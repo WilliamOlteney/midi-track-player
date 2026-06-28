@@ -1,0 +1,9 @@
+# MIDI Track Player dependencies
+#
+# Use Python 3.12. python-rtmidi publishes prebuilt wheels for 3.12 on
+# Windows, macOS, and Linux; 3.13/3.14 currently have no wheel and would
+# require a C++ compiler to build from source.
+
+PySide6>=6.6        # Qt-based desktop UI
+mido>=1.3           # Standard MIDI File parsing + message objects
+python-rtmidi>=1.5  # MIDI backend used by mido (CoreMIDI on macOS)
