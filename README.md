@@ -38,7 +38,8 @@ Built with **PySide6** (UI), **mido** (MIDI file parsing), and
   pitch bend, sustain pedal, and **tempo changes** — with timing preserved
   exactly (tempo is read from the whole file, even when it lives in a separate
   conductor track)
-- **Speed** control (50–150%), **Loop**, and **Mute**
+- **Speed** buttons (0.25× / 0.5× / 0.75× / 1× / 1.5× / 2×), **Loop**, and
+  **Mute**
 - **Editing** (track-level): rename, transpose, change instrument, or delete a
   track via the Edit menu or right-click on a track. Full **undo/redo**, an
   unsaved-changes (`*`) indicator, and non-destructive **Save As** — the

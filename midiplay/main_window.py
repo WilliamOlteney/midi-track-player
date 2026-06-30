@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, QItemSelectionModel, QSettings, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -36,6 +37,18 @@ from midiplay.piano_view import TRACK_COLORS, PianoView
 
 # Note-less tracks (e.g. a conductor/tempo track) are shown greyed out.
 EMPTY_TRACK_COLOR = QColor(0x80, 0x80, 0x80)
+
+# Discrete playback-speed choices, shown as a row of buttons (1× = recorded
+# tempo). Each is (multiplier, button label).
+SPEED_OPTIONS = (
+    (0.25, "0.25×"),
+    (0.5, "0.5×"),
+    (0.75, "0.75×"),
+    (1.0, "1×"),
+    (1.5, "1.5×"),
+    (2.0, "2×"),
+)
+DEFAULT_SPEED = 1.0
 
 
 def format_time(seconds: float) -> str:
@@ -278,17 +291,21 @@ class MainWindow(QMainWindow):
         row.addWidget(self.mute_check)
         row.addStretch(1)
 
-        self.speed_slider = QSlider(Qt.Orientation.Horizontal)
-        self.speed_slider.setRange(50, 150)   # percent
-        self.speed_slider.setValue(100)
-        self.speed_slider.setSingleStep(5)
-        self.speed_slider.setPageStep(10)
-        self.speed_slider.setFixedWidth(140)
-        self.speed_slider.valueChanged.connect(self._on_speed_changed)
-        self.speed_label = QLabel("100%")
         row.addWidget(QLabel("Speed:"))
-        row.addWidget(self.speed_slider)
-        row.addWidget(self.speed_label)
+        # Exclusive group of checkable buttons — one fixed speed each.
+        self.speed_group = QButtonGroup(self)
+        self.speed_group.setExclusive(True)
+        for value, label in SPEED_OPTIONS:
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # keep Space for play/pause
+            button.setFixedWidth(48)
+            button.setChecked(value == DEFAULT_SPEED)
+            button.clicked.connect(
+                lambda _checked, v=value: self._on_speed_changed(v)
+            )
+            self.speed_group.addButton(button)
+            row.addWidget(button)
         return row
 
     # -- File loading -----------------------------------------------------
@@ -530,9 +547,8 @@ class MainWindow(QMainWindow):
         if self._prepare():
             self.engine.restart()
 
-    def _on_speed_changed(self, percent: int) -> None:
-        self.speed_label.setText(f"{percent}%")
-        self.engine.set_speed(percent / 100.0)
+    def _on_speed_changed(self, multiplier: float) -> None:
+        self.engine.set_speed(multiplier)
 
     # -- Seeking ----------------------------------------------------------
     def _on_seek_started(self) -> None:
