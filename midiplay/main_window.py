@@ -7,7 +7,7 @@ engine to drive the progress bar, time labels, and button states.
 
 import copy
 
-from PySide6.QtCore import Qt, QSettings, QTimer, Signal
+from PySide6.QtCore import Qt, QItemSelectionModel, QSettings, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -187,10 +187,12 @@ class MainWindow(QMainWindow):
         col.addWidget(QLabel("Tracks"))
         self.track_list = QListWidget()
         self.track_list.setEnabled(False)  # enabled once a file is loaded
+        # Multi-select so several tracks can play at once (Ctrl/Shift-click);
+        # editing still targets only the focused/"current" track.
         self.track_list.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection
+            QAbstractItemView.SelectionMode.ExtendedSelection
         )
-        self.track_list.currentRowChanged.connect(self._on_track_changed)
+        self.track_list.itemSelectionChanged.connect(self._on_selection_changed)
         self.track_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.track_list.customContextMenuRequested.connect(self._track_context_menu)
         col.addWidget(self.track_list, stretch=1)
@@ -347,11 +349,27 @@ class MainWindow(QMainWindow):
         self.track_list.setCurrentRow(select_row)
 
     def selected_track_index(self) -> int | None:
-        """0-based index of the currently selected track, or None."""
+        """0-based index of the *primary* track — the focused/current one,
+        which is the single track that edits apply to. None if nothing is
+        selected."""
         item = self.track_list.currentItem()
-        if item is None:
+        if item is not None and item.isSelected():
+            return item.data(Qt.ItemDataRole.UserRole)
+        # Fall back to the topmost selected track (e.g. after a range select).
+        selected = self.track_list.selectedItems()
+        if not selected:
             return None
+        item = min(selected, key=self.track_list.row)
         return item.data(Qt.ItemDataRole.UserRole)
+
+    def selected_track_indices(self) -> list[int]:
+        """0-based indices of every selected track, in file order. These are
+        the tracks that play simultaneously."""
+        indices = [
+            item.data(Qt.ItemDataRole.UserRole)
+            for item in self.track_list.selectedItems()
+        ]
+        return sorted(indices)
 
     # -- MIDI output devices ----------------------------------------------
     def _refresh_devices(self) -> None:
@@ -419,14 +437,17 @@ class MainWindow(QMainWindow):
                 self.device_combo.setCurrentIndex(index)
                 self.device_combo.blockSignals(False)
 
-    def _on_track_changed(self, _row: int = -1) -> None:
-        """User picked a different track: stop and load it into the engine so
-        the total time shows and seeking works before the first Play."""
+    def _on_selection_changed(self) -> None:
+        """User changed which track(s) are selected: stop and load them all
+        into the engine so the total time shows and seeking works before the
+        first Play. Multiple selected tracks play simultaneously."""
         self.engine.stop()
-        track = self.selected_track_index()
-        if self.midi_file is not None and track is not None:
-            self.engine.set_track(self.midi_file, track)
-            self._prepared_key = (id(self.midi_file), track)
+        tracks = self.selected_track_indices()
+        if self.midi_file is not None and tracks:
+            self.engine.set_tracks(self.midi_file, tracks)
+            self._prepared_key = (id(self.midi_file), tuple(tracks))
+        else:
+            self._prepared_key = None
         self._refresh_piano_view()
         self._update_edit_actions()
 
@@ -466,16 +487,16 @@ class MainWindow(QMainWindow):
         if self.midi_file is None:
             self.statusBar().showMessage("Open a MIDI file first")
             return False
-        track = self.selected_track_index()
-        if track is None:
+        tracks = self.selected_track_indices()
+        if not tracks:
             self.statusBar().showMessage("Select a track to play")
             return False
         if not self._ensure_port():
             return False
 
-        key = (id(self.midi_file), track)
+        key = (id(self.midi_file), tuple(tracks))
         if self._prepared_key != key:
-            self.engine.set_track(self.midi_file, track)
+            self.engine.set_tracks(self.midi_file, tracks)
             self._prepared_key = key
         if self.engine.duration() <= 0:
             self.statusBar().showMessage("That track has no playable events")
@@ -572,15 +593,25 @@ class MainWindow(QMainWindow):
 
     def _refresh_piano_view(self, *_args) -> None:
         """Push the right content into the piano view based on the All-tracks
-        toggle. Called when the track, file, or toggle changes."""
+        toggle and how many tracks are selected. Called when the track, file,
+        or toggle changes."""
         if self._piano_window is None:
             return
         if self.midi_file is not None:
             self._piano_window.set_time_map(smf.TimeMap(self.midi_file))
+        primary = self.selected_track_index()
+        selected = self.selected_track_indices()
         if self.all_tracks_check.isChecked() and self.midi_file is not None:
             per_track = smf.extract_all_notes(self.midi_file)
             self._piano_window.set_multi_notes(
-                per_track, self.engine.duration(), self.selected_track_index()
+                per_track, self.engine.duration(), primary
+            )
+        elif self.midi_file is not None and len(selected) > 1:
+            # Several tracks playing: show them color-coded, the primary
+            # (editable) one emphasized and the rest dimmed.
+            per_track = smf.extract_notes_for(self.midi_file, selected)
+            self._piano_window.set_multi_notes(
+                per_track, self.engine.duration(), primary
             )
         else:
             self._piano_window.refresh_notes()
@@ -668,7 +699,16 @@ class MainWindow(QMainWindow):
         item = self.track_list.itemAt(pos)
         if item is None:
             return
-        self.track_list.setCurrentItem(item)
+        # Make the right-clicked track the edit target. If it's already part
+        # of a multi-selection, keep that selection (so playback isn't
+        # disrupted) and just move the "current" focus to it; otherwise select
+        # it alone.
+        if item.isSelected():
+            self.track_list.setCurrentItem(
+                item, QItemSelectionModel.SelectionFlag.NoUpdate
+            )
+        else:
+            self.track_list.setCurrentItem(item)
         menu = QMenu(self)
         menu.addAction("Rename…", self._edit_rename)
         menu.addAction("Transpose…", self._edit_transpose)
@@ -811,11 +851,11 @@ class MainWindow(QMainWindow):
             self._populate_tracks(select_row=row)
         self.track_list.blockSignals(False)
 
-        track = self.selected_track_index()
+        tracks = self.selected_track_indices()
         self._prepared_key = None
-        if track is not None and self.midi_file is not None:
-            self.engine.set_track(self.midi_file, track)
-            self._prepared_key = (id(self.midi_file), track)
+        if tracks and self.midi_file is not None:
+            self.engine.set_tracks(self.midi_file, tracks)
+            self._prepared_key = (id(self.midi_file), tuple(tracks))
         self._refresh_piano_view()
         self._update_title()
         self._update_edit_actions()

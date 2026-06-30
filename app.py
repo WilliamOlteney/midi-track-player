@@ -4,7 +4,7 @@ Run with:
 
     python app.py
 
-Loads a Standard MIDI File and plays a single selected track to an
+Loads a Standard MIDI File and plays one or more selected tracks to an
 external MIDI output device.
 """
 
