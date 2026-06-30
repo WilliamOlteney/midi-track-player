@@ -1,8 +1,9 @@
 """Playback engine.
 
-Plays one track's pre-timed events to a MIDI output port on a dedicated
-thread, scheduling each event against a monotonic clock so timing does not
-drift. Supports play / pause / stop / restart, playback speed, looping, and
+Plays one or more tracks' pre-timed events (merged onto a shared time axis)
+to a MIDI output port on a dedicated thread, scheduling each event against a
+monotonic clock so timing does not drift. Supports play / pause / stop /
+restart, playback speed, looping, and
 a clean "panic" (note-offs + sustain reset + all-notes-off) so notes never
 hang when playback is interrupted.
 
@@ -60,9 +61,16 @@ class PlaybackEngine:
             self._port = port
 
     def set_track(self, midi: mido.MidiFile, track_index: int) -> None:
-        """Prepare a track for playback (stops any current playback)."""
+        """Prepare a single track for playback (stops any current playback)."""
+        self.set_tracks(midi, [track_index])
+
+    def set_tracks(self, midi: mido.MidiFile, track_indices) -> None:
+        """Prepare one or more tracks to play simultaneously (stops any
+        current playback). The tracks are merged onto a shared time axis and
+        streamed through the one worker, so the whole transport — play, pause,
+        seek, loop, speed, panic — works unchanged for multiple tracks."""
         self.stop()
-        timeline = smf.build_track_timeline(midi, track_index)
+        timeline = smf.build_multi_track_timeline(midi, track_indices)
         with self._lock:
             self._timeline = timeline
             self._next_index = 0

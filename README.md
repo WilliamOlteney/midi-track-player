@@ -1,8 +1,8 @@
 # MIDI Track Player
 
 A minimal, reliable desktop app that loads a Standard MIDI File (`.mid`) and
-plays **one selected track** to an external MIDI output device (e.g. a MIDI
-keyboard).
+plays **one or more selected tracks** to an external MIDI output device (e.g. a
+MIDI keyboard).
 
 Built with **PySide6** (UI), **mido** (MIDI file parsing), and
 **python-rtmidi** (MIDI I/O — CoreMIDI on macOS).
@@ -11,7 +11,9 @@ Built with **PySide6** (UI), **mido** (MIDI file parsing), and
 
 - Open a `.mid` file (file dialog or **drag-and-drop** onto the window)
 - Track list showing **track number · name · event count**
-- Select exactly one track to play
+- Select **one or more tracks** to play together (Ctrl/Shift-click for a
+  multi-selection); they're merged onto a shared time axis and play in sync.
+  Editing applies to the **focused (current) track** only
 - Choose any connected **MIDI output** (with **Refresh** for hot-plugging)
 - **Output channel** selector — keep each track's recorded channel, or force the
   played track onto one channel. Set this to your keyboard's receive channel if
@@ -68,7 +70,8 @@ python app.py
 ```
 
 1. **Open** a `.mid` file (or drag one onto the window).
-2. Pick the **track** to play and your **MIDI Output** device.
+2. Pick the **track(s)** to play (Ctrl/Shift-click to select several) and your
+   **MIDI Output** device.
 3. Press **Play**.
 
 ## Project layout
@@ -88,8 +91,9 @@ requirements.txt
 
 ## How it works (the parts that matter for reliability)
 
-- **Timing:** the selected track's events are converted to absolute seconds
-  using a tempo map built from *all* tracks, then scheduled on a dedicated
+- **Timing:** each selected track's events are converted to absolute seconds
+  using a tempo map built from *all* tracks; when several tracks are selected
+  they're merged into one time-ordered stream, then scheduled on a dedicated
   thread against a monotonic clock (absolute targets, so no drift).
 - **No hanging notes:** Pause/Stop/Loop perform a full "panic" (note-offs +
   sustain reset + all-notes-off + all-sound-off); a natural end only releases

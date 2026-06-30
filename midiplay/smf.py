@@ -234,6 +234,36 @@ def build_track_timeline(
     return timeline
 
 
+def build_multi_track_timeline(
+    midi: mido.MidiFile, track_indices, tempo_map: list | None = None
+) -> TrackTimeline:
+    """Flatten several tracks onto one shared time axis for simultaneous play.
+
+    Each track is timed independently (via the global tempo map) and the
+    resulting events are merged into a single time-ordered list, so the
+    playback engine can stream them through one worker exactly as it does a
+    single track. Channels and paired Note spans are unioned across tracks.
+    A single index collapses to the same result as build_track_timeline.
+    """
+    if tempo_map is None:
+        tempo_map = build_tempo_map(midi)
+
+    merged = TrackTimeline()
+    for track_index in track_indices:
+        sub = build_track_timeline(midi, track_index, tempo_map)
+        merged.events.extend(sub.events)
+        merged.channels |= sub.channels
+        merged.notes.extend(sub.notes)
+
+    # Stable sort on time only (never compares the Message payloads), so
+    # same-time events keep their per-track order.
+    merged.events.sort(key=lambda event: event[0])
+    if merged.events:
+        merged.duration = merged.events[-1][0]
+    merged.notes.sort(key=lambda n: n.start_tick)
+    return merged
+
+
 def _ticks_to_seconds(ticks: int, tempo: int, ticks_per_beat: int) -> float:
     """Convert a tick span to seconds at a given tempo (microseconds/beat)."""
     return ticks * tempo / (1_000_000.0 * ticks_per_beat)
@@ -303,8 +333,14 @@ class TimeMap:
 def extract_all_notes(midi: mido.MidiFile) -> list[tuple[int, list[Note]]]:
     """Notes for every track, as (track_index, notes), all on the same
     absolute-time axis (shared tempo map) so they line up when overlaid."""
+    return extract_notes_for(midi, range(len(midi.tracks)))
+
+
+def extract_notes_for(midi: mido.MidiFile, track_indices) -> list[tuple[int, list[Note]]]:
+    """Notes for a subset of tracks, as (track_index, notes), all on the same
+    absolute-time axis (shared tempo map) so they line up when overlaid."""
     tempo_map = build_tempo_map(midi)  # compute once, reuse for every track
     return [
         (index, build_track_timeline(midi, index, tempo_map).notes)
-        for index in range(len(midi.tracks))
+        for index in track_indices
     ]
