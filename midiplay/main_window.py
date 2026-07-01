@@ -142,6 +142,7 @@ class MainWindow(QMainWindow):
         self._redo_stack: list = []
         self._dirty = False
         self._save_path = None        # set once the user has chosen a Save target
+        self._pending_select_row = None  # row to select after a structural edit
 
         self._build_menus()
 
@@ -709,6 +710,8 @@ class MainWindow(QMainWindow):
         self.act_transpose = edit_menu.addAction("Transpose Track…", self._edit_transpose)
         self.act_instrument = edit_menu.addAction("Change Instrument…", self._edit_instrument)
         edit_menu.addSeparator()
+        self.act_merge = edit_menu.addAction("Merge Tracks", self._edit_merge)
+        self.act_merge.setToolTip("Combine the selected tracks into one (select two or more)")
         self.act_delete = edit_menu.addAction("Delete Track", self._edit_delete)
 
     def _track_context_menu(self, pos) -> None:
@@ -730,6 +733,8 @@ class MainWindow(QMainWindow):
         menu.addAction("Transpose…", self._edit_transpose)
         menu.addAction("Change Instrument…", self._edit_instrument)
         menu.addSeparator()
+        merge = menu.addAction("Merge Selected Tracks", self._edit_merge)
+        merge.setEnabled(self.act_merge.isEnabled())
         delete = menu.addAction("Delete Track", self._edit_delete)
         delete.setEnabled(self.act_delete.isEnabled())
         menu.exec(self.track_list.mapToGlobal(pos))
@@ -777,6 +782,16 @@ class MainWindow(QMainWindow):
             == QMessageBox.StandardButton.Yes
         ):
             self._apply_file_edit(lambda m: edits.delete_track(m, index))
+
+    def _edit_merge(self) -> None:
+        indices = self.selected_track_indices()
+        if self.midi_file is None or len(indices) < 2:
+            return
+        # The merged track lands at the earliest selected position; select it
+        # once the list is rebuilt so playback continues on the combined track.
+        self._pending_select_row = min(indices)
+        self._apply_file_edit(lambda m: edits.merge_tracks(m, indices))
+        self.statusBar().showMessage(f"Merged {len(indices)} tracks into one")
 
     def _apply_track_edit(self, index: int, mutator) -> None:
         """Edit affecting only one track: snapshot just that track (fast) then
@@ -863,9 +878,13 @@ class MainWindow(QMainWindow):
                     if info.has_notes else EMPTY_TRACK_COLOR
                 )
         else:
-            row = max(0, min(self.track_list.currentRow(), len(self.track_infos) - 1))
+            row = self._pending_select_row
+            if row is None:
+                row = self.track_list.currentRow()
+            row = max(0, min(row, len(self.track_infos) - 1))
             self._populate_tracks(select_row=row)
         self.track_list.blockSignals(False)
+        self._pending_select_row = None
 
         tracks = self.selected_track_indices()
         self._prepared_key = None
@@ -929,6 +948,7 @@ class MainWindow(QMainWindow):
         self.act_delete.setEnabled(
             has_track and has_file and len(self.midi_file.tracks) > 1
         )
+        self.act_merge.setEnabled(has_file and len(self.selected_track_indices()) >= 2)
         self.act_save.setEnabled(has_file)
         self.act_save_as.setEnabled(has_file)
         self.act_undo.setEnabled(bool(self._undo_stack))

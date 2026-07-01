@@ -226,3 +226,41 @@ def add_note(
         (start_tick + length, mido.Message("note_off", note=pitch, velocity=0, channel=channel))
     )
     _rebuild_track(track, abs_events)
+
+
+def merge_tracks(midi: mido.MidiFile, indices) -> int:
+    """Merge two or more tracks into one, replacing them with a single track
+    at the position of the earliest selected. Returns the merged track's index.
+
+    Every track's events are placed on a shared absolute-tick timeline and
+    interleaved in time order; each message keeps its own channel, so the
+    combined track can carry several channels at once. Duplicate track-name
+    meta events are dropped (the first track's name is kept). A no-op that
+    returns the sole index when fewer than two distinct tracks are given.
+    """
+    indices = sorted(set(indices))
+    if len(indices) < 2:
+        return indices[0] if indices else 0
+
+    abs_events: list[tuple[int, mido.Message]] = []
+    name_kept = False
+    for track_index in indices:
+        tick = 0
+        for msg in midi.tracks[track_index]:
+            tick += msg.time
+            if msg.is_meta and msg.type == "end_of_track":
+                continue  # _rebuild_track re-adds a single terminator
+            if msg.is_meta and msg.type == "track_name":
+                if name_kept:
+                    continue  # keep only the first track's name
+                name_kept = True
+            abs_events.append((tick, msg))
+
+    merged = mido.MidiTrack()
+    _rebuild_track(merged, abs_events)
+
+    target = indices[0]
+    for track_index in reversed(indices):  # delete high-to-low to keep indices valid
+        del midi.tracks[track_index]
+    midi.tracks.insert(target, merged)
+    return target
