@@ -10,9 +10,15 @@ Built with **PySide6** (UI), **mido** (MIDI file parsing), and
 ## Layout
 
 Everything lives in **one window**. A Synthesia-style **falling-notes piano**
-is always visible and fills the window; all the controls (file, tracks,
-devices, transport) live in a **drawer that slides out from the left** — click
-the handle on its edge to show or hide it.
+is always visible and fills the window, with two **sliding drawers** floating
+over it:
+
+- a **left drawer** with all the controls (file, tracks, devices, transport), and
+- a **right drawer** with view/appearance **settings**.
+
+Each drawer has a **handle on its edge** to show/hide it and a **drag-grip** to
+resize its width, and both are **partially transparent** so the piano shows
+through (the transparency is adjustable in Settings).
 
 ## Features
 
@@ -53,6 +59,11 @@ the handle on its edge to show or hide it.
   conductor track)
 - **Speed** buttons (0.25× / 0.5× / 0.75× / 1× / 1.5× / 2×), **Loop**, and
   **Mute**
+- **Settings drawer** (right side): a **color scheme** picker (Midnight, Light,
+  Slate, Emerald, Amber — recolours the whole UI, piano included), **panel
+  opacity** (how transparent the drawers are), piano **fall time** (seconds of
+  upcoming notes shown), **note-name labels** on/off, and the **control legend**
+  on/off. Settings are remembered between runs
 - **Editing** (track-level): rename, transpose, change instrument, delete a
   track, or **merge the playing (🔊) tracks into one** (their events are
   interleaved in time and each keeps its channel) — via the Edit menu or
@@ -102,6 +113,7 @@ midiplay/
   devices.py           MIDI output enumeration / connection (rtmidi backend)
   engine.py            playback engine: scheduling, transport, seek, panic
   edits.py             track edit operations (rename/transpose/instrument/delete)
+  theme.py             UI color schemes (piano colours + widget palettes)
   piano_view.py        Synthesia-style falling-notes piano-roll widget
   main_window.py       PySide6 window: piano + left control drawer, wiring
 requirements.txt

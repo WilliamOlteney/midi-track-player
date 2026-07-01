@@ -61,7 +61,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from midiplay import devices, edits, smf
+from midiplay import devices, edits, smf, theme as themes
 from midiplay.engine import PlaybackEngine, PlayerState
 from midiplay.piano_view import TRACK_COLORS, PianoRollView
 
@@ -152,69 +152,151 @@ def _hline() -> QFrame:
     return line
 
 
-class SlideDrawer(QWidget):
-    """Hosts a `content` widget that fills the whole area, with a `panel` that
-    slides in and out from the left edge as a drawer. A small handle button on
-    the drawer's right edge toggles it with a short animation; the handle rides
-    the drawer's edge so it is reachable whether the drawer is open or closed."""
+class _ResizeGrip(QWidget):
+    """A thin vertical strip the user drags to resize a drawer. Reports each
+    horizontal drag delta (global px) to a callback."""
 
-    def __init__(self, content: QWidget, panel: QWidget, panel_width: int = 340) -> None:
-        super().__init__()
-        self._panel_width = panel_width
-        self._open = True
+    def __init__(self, parent, on_drag) -> None:
+        super().__init__(parent)
+        self._on_drag = on_drag
+        self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self._last_x = None
 
-        self._content = content
-        self._content.setParent(self)
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._last_x = event.globalPosition().toPoint().x()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event) -> None:
+        if self._last_x is not None:
+            x = event.globalPosition().toPoint().x()
+            self._on_drag(x - self._last_x)
+            self._last_x = x
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._last_x is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._last_x = None
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+
+class Drawer:
+    """One edge-docked panel that slides in and out of a `host` widget, with a
+    toggle handle and a drag-to-resize grip on its inner edge. `side` is 'left'
+    or 'right'. The panel floats over the host's main content (the piano)."""
+
+    MIN_W = 240
+    MAX_W = 720
+    GRIP = 6
+    HANDLE_W = 22
+    HANDLE_H = 64
+
+    def __init__(self, host, panel, side="left", width=340, start_open=True) -> None:
+        self._host = host
         self._panel = panel
-        self._panel.setParent(self)
-        self._panel.setAutoFillBackground(True)  # opaque over the piano
-        self._panel.setObjectName("drawerPanel")
-        self._panel.setStyleSheet(
-            "#drawerPanel { background: palette(window); "
-            "border-right: 1px solid palette(mid); }"
-        )
+        self._side = side
+        self._width = width
+        self._open = start_open
 
-        self._handle = QPushButton("‹", self)
-        self._handle.setFixedSize(22, 64)
+        panel.setParent(host)
+        panel.setObjectName("drawerPanel")
+        panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        self._grip = _ResizeGrip(host, self._on_grip_drag)
+
+        self._handle = QPushButton(host)
+        self._handle.setFixedSize(self.HANDLE_W, self.HANDLE_H)
         self._handle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._handle.setToolTip("Show or hide the controls")
+        self._handle.setToolTip("Show or hide this panel")
         self._handle.clicked.connect(self.toggle)
 
-        self._anim = QPropertyAnimation(self._panel, b"pos", self)
+        self._anim = QPropertyAnimation(panel, b"pos", host)
         self._anim.setDuration(200)
         self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        self._anim.valueChanged.connect(self._follow_handle)
+        self._anim.valueChanged.connect(lambda _pos: self._place_edge_widgets())
 
-        self._panel.raise_()
+        self._update_handle_text()
+        panel.raise_()
+        self._grip.raise_()
         self._handle.raise_()
 
-    def _panel_x(self, is_open: bool) -> int:
-        return 0 if is_open else -self._panel_width
+    def _open_x(self) -> int:
+        return 0 if self._side == "left" else self._host.width() - self._width
 
-    def resizeEvent(self, event) -> None:
-        self._content.setGeometry(0, 0, self.width(), self.height())
-        self._panel.setGeometry(
-            self._panel_x(self._open), 0, self._panel_width, self.height()
-        )
-        self._place_handle()
-        super().resizeEvent(event)
+    def _closed_x(self) -> int:
+        return -self._width if self._side == "left" else self._host.width()
 
-    def _place_handle(self) -> None:
-        y = max(0, (self.height() - self._handle.height()) // 2)
-        self._handle.move(self._panel.x() + self._panel_width, y)
+    def relayout(self) -> None:
+        x = self._open_x() if self._open else self._closed_x()
+        self._panel.setGeometry(x, 0, self._width, self._host.height())
+        self._place_edge_widgets()
 
-    def _follow_handle(self, pos) -> None:
-        # Keep the handle glued to the drawer's right edge as it animates.
-        self._handle.move(pos.x() + self._panel_width, self._handle.y())
+    def _edge_x(self) -> int:
+        # x of the panel's inner edge (right edge for a left drawer, else left).
+        return self._panel.x() + self._width if self._side == "left" else self._panel.x()
+
+    def _place_edge_widgets(self) -> None:
+        edge = self._edge_x()
+        height = self._host.height()
+        self._grip.setGeometry(edge - self.GRIP // 2, 0, self.GRIP, height)
+        self._grip.setVisible(self._open)
+        y = max(0, (height - self.HANDLE_H) // 2)
+        self._handle.move(edge if self._side == "left" else edge - self.HANDLE_W, y)
+        self._grip.raise_()
+        self._handle.raise_()
+
+    def _update_handle_text(self) -> None:
+        if self._side == "left":
+            self._handle.setText("‹" if self._open else "›")
+        else:
+            self._handle.setText("›" if self._open else "‹")
 
     def toggle(self) -> None:
         self._open = not self._open
-        self._handle.setText("‹" if self._open else "›")
+        self._update_handle_text()
+        self._grip.setVisible(self._open)
         self._anim.stop()
         self._anim.setStartValue(self._panel.pos())
-        self._anim.setEndValue(QPoint(self._panel_x(self._open), 0))
+        target = self._open_x() if self._open else self._closed_x()
+        self._anim.setEndValue(QPoint(target, 0))
         self._anim.start()
+
+    def _on_grip_drag(self, dx: int) -> None:
+        if not self._open:
+            return
+        delta = dx if self._side == "left" else -dx
+        self._width = max(self.MIN_W, min(self.MAX_W, self._width + delta))
+        self.relayout()
+
+    def set_panel_style(self, style: str) -> None:
+        self._panel.setStyleSheet(style)
+
+
+class DrawerHost(QWidget):
+    """A widget whose `content` fills it, with any number of edge Drawers
+    floating over the content."""
+
+    def __init__(self, content: QWidget) -> None:
+        super().__init__()
+        self._content = content
+        content.setParent(self)
+        self._drawers: list[Drawer] = []
+
+    def add_drawer(self, drawer: Drawer) -> None:
+        self._drawers.append(drawer)
+        drawer.relayout()
+
+    def resizeEvent(self, event) -> None:
+        self._content.setGeometry(0, 0, self.width(), self.height())
+        for drawer in self._drawers:
+            drawer.relayout()
+        super().resizeEvent(event)
 
 
 class TrackToggleDelegate(QStyledItemDelegate):
@@ -374,6 +456,12 @@ class MainWindow(QMainWindow):
         self._settings = QSettings()  # remembers the last output device
         self.setAcceptDrops(True)     # drag a .mid onto the window
         self._seeking = False         # True while the user drags the seek bar
+        self._theme = themes.DEFAULT_THEME  # current colour scheme
+
+        # A consistent style across platforms so theme palettes apply cleanly.
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyle("Fusion")
 
         # Editing state: snapshot-based undo/redo + unsaved-changes tracking.
         self._undo_stack: list = []
@@ -386,17 +474,21 @@ class MainWindow(QMainWindow):
 
         self._build_menus()
 
-        # The controls live in a left drawer over an always-visible piano.
-        panel = QWidget()
-        panel.setMinimumWidth(320)
-        panel_layout = QVBoxLayout(panel)
-        panel_layout.setContentsMargins(12, 12, 12, 12)
-        panel_layout.setSpacing(10)
-        panel_layout.addLayout(self._build_top())
-        panel_layout.addWidget(_hline())
-        panel_layout.addLayout(self._build_middle())
-        panel_layout.addWidget(_hline())
-        panel_layout.addLayout(self._build_bottom())
+        # The always-visible piano fills the window; a left drawer holds the
+        # controls and a right drawer holds view/appearance settings, both
+        # floating over the piano.
+        controls = QWidget()
+        controls.setMinimumWidth(240)
+        controls_layout = QVBoxLayout(controls)
+        controls_layout.setContentsMargins(12, 12, 12, 12)
+        controls_layout.setSpacing(10)
+        controls_layout.addLayout(self._build_top())
+        controls_layout.addWidget(_hline())
+        controls_layout.addLayout(self._build_middle())
+        controls_layout.addWidget(_hline())
+        controls_layout.addLayout(self._build_bottom())
+
+        settings_panel = self._build_settings_panel()
 
         self._roll = PianoRollView()
         self._roll.notesDeleteRequested.connect(self._delete_notes)
@@ -404,14 +496,24 @@ class MainWindow(QMainWindow):
         self._roll.noteAddRequested.connect(self._add_note)
         self._roll.playPauseRequested.connect(self._toggle_play_pause)
         self._roll.scrubFinished.connect(self.engine.seek)
+        self._roll.lookAheadChanged.connect(self._sync_lookahead_slider)
+        self._roll.legendToggled.connect(self._sync_legend_check)
 
-        self._drawer = SlideDrawer(self._roll, panel)
-        self.setCentralWidget(self._drawer)
+        host = DrawerHost(self._roll)
+        self._left_drawer = Drawer(host, controls, side="left", width=340)
+        # The settings drawer starts tucked away on the right.
+        self._right_drawer = Drawer(
+            host, settings_panel, side="right", width=300, start_open=False
+        )
+        host.add_drawer(self._left_drawer)
+        host.add_drawer(self._right_drawer)
+        self.setCentralWidget(host)
         self.statusBar().showMessage("No file loaded")
 
         self._refresh_devices()
         self._restore_last_device()
         self._restore_output_channel()
+        self._restore_view_settings()  # opacity, fall time, labels, legend
 
         # Poll the engine to drive the progress bar, time labels, and which
         # transport buttons are enabled.
@@ -562,6 +664,151 @@ class MainWindow(QMainWindow):
             self.speed_group.addButton(button)
             row.addWidget(button)
         return row
+
+    # -- Right drawer: view / appearance settings -------------------------
+    def _build_settings_panel(self) -> QWidget:
+        panel = QWidget()
+        panel.setMinimumWidth(220)
+        col = QVBoxLayout(panel)
+        col.setContentsMargins(12, 12, 12, 12)
+        col.setSpacing(10)
+        col.addWidget(QLabel("<b>Settings</b>"))
+
+        col.addWidget(_hline())
+        col.addWidget(QLabel("Appearance"))
+        scheme_row = QHBoxLayout()
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(list(themes.THEMES.keys()))
+        self.theme_combo.setToolTip("The overall UI colour scheme")
+        self.theme_combo.currentTextChanged.connect(self._on_theme_changed)
+        scheme_row.addWidget(QLabel("Color scheme"))
+        scheme_row.addWidget(self.theme_combo, stretch=1)
+        col.addLayout(scheme_row)
+        opacity_row = QHBoxLayout()
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(40, 100)   # percent
+        self.opacity_slider.setToolTip("How opaque the sliding panels are")
+        self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        self.opacity_label = QLabel()
+        opacity_row.addWidget(QLabel("Panel opacity"))
+        opacity_row.addWidget(self.opacity_slider, stretch=1)
+        opacity_row.addWidget(self.opacity_label)
+        col.addLayout(opacity_row)
+
+        col.addWidget(_hline())
+        col.addWidget(QLabel("Piano"))
+        fall_row = QHBoxLayout()
+        self.lookahead_slider = QSlider(Qt.Orientation.Horizontal)
+        self.lookahead_slider.setRange(1, 10)   # seconds of look-ahead
+        self.lookahead_slider.setToolTip("How many seconds of upcoming notes are visible")
+        self.lookahead_slider.valueChanged.connect(self._on_lookahead_changed)
+        self.lookahead_label = QLabel()
+        fall_row.addWidget(QLabel("Fall time"))
+        fall_row.addWidget(self.lookahead_slider, stretch=1)
+        fall_row.addWidget(self.lookahead_label)
+        col.addLayout(fall_row)
+
+        self.labels_check = QCheckBox("Note-name labels")
+        self.labels_check.toggled.connect(self._on_labels_toggled)
+        col.addWidget(self.labels_check)
+        self.legend_check = QCheckBox("Control legend (H)")
+        self.legend_check.toggled.connect(self._on_legend_toggled)
+        col.addWidget(self.legend_check)
+
+        col.addStretch(1)
+        return panel
+
+    def _panel_style(self, alpha: int, side: str) -> str:
+        """Stylesheet for a drawer panel: a translucent background (in the
+        current theme's panel colour) so the piano shows through, with a subtle
+        divider on the inner edge."""
+        border = "border-right" if side == "left" else "border-left"
+        p = self._theme.panel
+        b = self._theme.panel_border
+        return (
+            f"#drawerPanel {{ background: rgba({p.red()}, {p.green()}, {p.blue()}, {alpha}); "
+            f"{border}: 1px solid rgba({b.red()}, {b.green()}, {b.blue()}, {b.alpha()}); }}"
+        )
+
+    def _on_theme_changed(self, name: str) -> None:
+        theme = themes.THEMES.get(name)
+        if theme is None:
+            return
+        self._apply_theme(theme)
+        self._settings.setValue("theme", name)
+
+    def _apply_theme(self, theme) -> None:
+        """Recolour the whole UI: widget palette, the piano, and the drawer
+        panels (keeping the current opacity)."""
+        self._theme = theme
+        app = QApplication.instance()
+        if app is not None:
+            app.setPalette(themes.build_palette(theme))
+        self._roll.set_theme(theme)
+        self._apply_panel_opacity(self.opacity_slider.value())
+
+    def _apply_panel_opacity(self, percent: int) -> None:
+        alpha = max(0, min(255, round(percent / 100 * 255)))
+        self._left_drawer.set_panel_style(self._panel_style(alpha, "left"))
+        self._right_drawer.set_panel_style(self._panel_style(alpha, "right"))
+
+    def _on_opacity_changed(self, percent: int) -> None:
+        self.opacity_label.setText(f"{percent}%")
+        self._apply_panel_opacity(percent)
+        self._settings.setValue("panel_opacity", percent)
+
+    def _on_lookahead_changed(self, seconds: int) -> None:
+        self.lookahead_label.setText(f"{seconds}s")
+        self._roll.set_look_ahead(float(seconds))
+        self._settings.setValue("look_ahead", seconds)
+
+    def _sync_lookahead_slider(self, seconds: float) -> None:
+        """Reflect the piano's look-ahead (e.g. changed by middle-drag zoom)
+        back onto the slider without feeding the change back to the piano."""
+        value = max(1, min(10, int(round(seconds))))
+        self.lookahead_slider.blockSignals(True)
+        self.lookahead_slider.setValue(value)
+        self.lookahead_slider.blockSignals(False)
+        self.lookahead_label.setText(f"{value}s")
+
+    def _on_labels_toggled(self, on: bool) -> None:
+        self._roll.set_labels_visible(on)
+        self._settings.setValue("note_labels", on)
+
+    def _on_legend_toggled(self, on: bool) -> None:
+        self._roll.set_legend_visible(on)
+        self._settings.setValue("legend", on)
+
+    def _sync_legend_check(self, on: bool) -> None:
+        """Reflect the piano's legend state (toggled with 'H') on the checkbox."""
+        self.legend_check.blockSignals(True)
+        self.legend_check.setChecked(on)
+        self.legend_check.blockSignals(False)
+
+    def _restore_view_settings(self) -> None:
+        """Load persisted view settings and apply them to the widgets AND the
+        piano/panels. We apply directly (not only via the widgets' signals),
+        because a persisted value that equals a widget's default state emits no
+        change signal and would otherwise never be applied."""
+        opacity = max(40, min(100, int(self._settings.value("panel_opacity", 80))))
+        look_ahead = max(1, min(10, int(self._settings.value("look_ahead", 3))))
+        labels = self._settings.value("note_labels", True, type=bool)
+        legend = self._settings.value("legend", True, type=bool)
+        theme_name = self._settings.value("theme", themes.DEFAULT_THEME_NAME)
+        theme = themes.THEMES.get(theme_name, themes.DEFAULT_THEME)
+
+        self.theme_combo.setCurrentText(theme.name)
+        self.opacity_slider.setValue(opacity)
+        self.lookahead_slider.setValue(look_ahead)
+        self.labels_check.setChecked(labels)
+        self.legend_check.setChecked(legend)
+
+        self.opacity_label.setText(f"{opacity}%")
+        self.lookahead_label.setText(f"{look_ahead}s")
+        self._apply_theme(theme)  # palette + piano + panels (uses opacity above)
+        self._roll.set_look_ahead(float(look_ahead))
+        self._roll.set_labels_visible(labels)
+        self._roll.set_legend_visible(legend)
 
     # -- File loading -----------------------------------------------------
     def _choose_file(self) -> None:

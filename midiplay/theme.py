@@ -1,0 +1,246 @@
+"""UI color schemes (themes).
+
+A :class:`Theme` bundles every colour the app paints itself with — the piano
+view's colours plus a Qt widget palette for the drawers/buttons/list. The
+:data:`THEMES` presets are offered in the settings drawer; switching one
+recolours the whole UI. Track-identity colours (piano_view.TRACK_COLORS) are
+intentionally *not* themed, so a track keeps the same colour in every scheme.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from PySide6.QtGui import QColor, QPalette
+
+
+@dataclass(frozen=True)
+class Theme:
+    name: str
+
+    # -- Piano view --------------------------------------------------------
+    bg: QColor
+    hit_line: QColor
+    hit_glow: QColor
+    guide: QColor
+    note_white: QColor      # single-track note landing on a white key
+    note_black: QColor      # single-track note landing on a black key
+    note_border: QColor
+    note_text: QColor       # fill of the note-name label
+    selection: QColor       # selected-note outline + note-label outline
+    key_white: QColor
+    key_black: QColor
+    key_active: QColor
+    key_border: QColor
+    key_label: QColor
+    legend_bg: QColor
+    legend_border: QColor
+    legend_key: QColor
+    legend_text: QColor
+
+    # -- Qt widgets (palette) + drawer panels ------------------------------
+    win: QColor
+    base: QColor
+    text: QColor
+    button: QColor
+    highlight: QColor
+    highlight_text: QColor
+    panel: QColor           # base colour of the (translucent) drawer panels
+    panel_border: QColor
+
+    @property
+    def dark(self) -> bool:
+        return self.win.lightnessF() < 0.5
+
+
+def _c(*args) -> QColor:
+    return QColor(*args)
+
+
+MIDNIGHT = Theme(
+    name="Midnight",
+    bg=_c(0x16, 0x18, 0x1F),
+    hit_line=_c(0xFF, 0xFF, 0xFF, 0xB0),
+    hit_glow=_c(0x7E, 0xB0, 0xFF),
+    guide=_c(0xFF, 0xFF, 0xFF, 0x14),
+    note_white=_c(0x4C, 0x8B, 0xF5),
+    note_black=_c(0x2E, 0x5C, 0xC8),
+    note_border=_c(0x0E, 0x1A, 0x30),
+    note_text=_c(0x0C, 0x18, 0x2E),
+    selection=_c(0xFF, 0xFF, 0xFF),
+    key_white=_c(0xE8, 0xE9, 0xED),
+    key_black=_c(0x1B, 0x1D, 0x24),
+    key_active=_c(0x6F, 0xA8, 0xFF),
+    key_border=_c(0x3A, 0x3D, 0x47),
+    key_label=_c(0x8A, 0x8D, 0x97),
+    legend_bg=_c(0x12, 0x12, 0x18, 0xCD),
+    legend_border=_c(0xFF, 0xFF, 0xFF, 0x33),
+    legend_key=_c(0x9F, 0xC4, 0xFF),
+    legend_text=_c(0xCC, 0xCC, 0xCC),
+    win=_c(0x23, 0x26, 0x2E),
+    base=_c(0x1B, 0x1E, 0x25),
+    text=_c(0xE6, 0xE7, 0xEB),
+    button=_c(0x2E, 0x32, 0x3C),
+    highlight=_c(0x4C, 0x8B, 0xF5),
+    highlight_text=_c(0xFF, 0xFF, 0xFF),
+    panel=_c(0x26, 0x2A, 0x33),
+    panel_border=_c(0xFF, 0xFF, 0xFF, 0x2D),
+)
+
+LIGHT = Theme(
+    name="Light",
+    bg=_c(0xF2, 0xF3, 0xF5),
+    hit_line=_c(0x28, 0x2A, 0x33, 0xB4),
+    hit_glow=_c(0x4C, 0x8B, 0xF5),
+    guide=_c(0x00, 0x00, 0x00, 0x14),
+    note_white=_c(0x4C, 0x8B, 0xF5),
+    note_black=_c(0x2E, 0x5C, 0xC8),
+    note_border=_c(0x1B, 0x2B, 0x4A),
+    note_text=_c(0xFF, 0xFF, 0xFF),
+    selection=_c(0x1B, 0x2B, 0x4A),
+    key_white=_c(0xFF, 0xFF, 0xFF),
+    key_black=_c(0x44, 0x4A, 0x55),
+    key_active=_c(0x4C, 0x8B, 0xF5),
+    key_border=_c(0xB8, 0xBC, 0xC4),
+    key_label=_c(0x88, 0x8D, 0x97),
+    legend_bg=_c(0xFA, 0xFA, 0xFC, 0xE1),
+    legend_border=_c(0x00, 0x00, 0x00, 0x28),
+    legend_key=_c(0x2A, 0x5A, 0xA8),
+    legend_text=_c(0x33, 0x33, 0x33),
+    win=_c(0xEC, 0xED, 0xEF),
+    base=_c(0xFF, 0xFF, 0xFF),
+    text=_c(0x1E, 0x20, 0x26),
+    button=_c(0xE2, 0xE4, 0xE8),
+    highlight=_c(0x4C, 0x8B, 0xF5),
+    highlight_text=_c(0xFF, 0xFF, 0xFF),
+    panel=_c(0xF6, 0xF7, 0xF9),
+    panel_border=_c(0x78, 0x78, 0x82, 0x5A),
+)
+
+SLATE = Theme(
+    name="Slate",
+    bg=_c(0x1C, 0x1F, 0x22),
+    hit_line=_c(0xFF, 0xFF, 0xFF, 0xAA),
+    hit_glow=_c(0x46, 0xC6, 0xC6),
+    guide=_c(0xFF, 0xFF, 0xFF, 0x12),
+    note_white=_c(0x46, 0xC6, 0xC6),
+    note_black=_c(0x2F, 0x8C, 0x8C),
+    note_border=_c(0x10, 0x20, 0x1F),
+    note_text=_c(0x06, 0x1A, 0x1A),
+    selection=_c(0xFF, 0xFF, 0xFF),
+    key_white=_c(0xE6, 0xE8, 0xE8),
+    key_black=_c(0x20, 0x24, 0x26),
+    key_active=_c(0x5F, 0xD6, 0xD6),
+    key_border=_c(0x3A, 0x3E, 0x42),
+    key_label=_c(0x88, 0x8C, 0x90),
+    legend_bg=_c(0x12, 0x15, 0x16, 0xCD),
+    legend_border=_c(0xFF, 0xFF, 0xFF, 0x30),
+    legend_key=_c(0x8F, 0xDE, 0xDE),
+    legend_text=_c(0xCC, 0xCC, 0xCC),
+    win=_c(0x26, 0x2A, 0x2D),
+    base=_c(0x1E, 0x21, 0x24),
+    text=_c(0xE6, 0xE8, 0xE8),
+    button=_c(0x31, 0x36, 0x39),
+    highlight=_c(0x46, 0xC6, 0xC6),
+    highlight_text=_c(0x06, 0x1A, 0x1A),
+    panel=_c(0x27, 0x2B, 0x2E),
+    panel_border=_c(0xFF, 0xFF, 0xFF, 0x28),
+)
+
+EMERALD = Theme(
+    name="Emerald",
+    bg=_c(0x14, 0x20, 0x1A),
+    hit_line=_c(0xFF, 0xFF, 0xFF, 0xAA),
+    hit_glow=_c(0x57, 0xC9, 0x7E),
+    guide=_c(0xFF, 0xFF, 0xFF, 0x12),
+    note_white=_c(0x4C, 0xC0, 0x6A),
+    note_black=_c(0x2E, 0x8C, 0x4C),
+    note_border=_c(0x0C, 0x20, 0x15),
+    note_text=_c(0x06, 0x1C, 0x0E),
+    selection=_c(0xFF, 0xFF, 0xFF),
+    key_white=_c(0xE6, 0xEC, 0xE7),
+    key_black=_c(0x1A, 0x24, 0x1D),
+    key_active=_c(0x6F, 0xD6, 0x8C),
+    key_border=_c(0x37, 0x47, 0x3C),
+    key_label=_c(0x85, 0x90, 0x85),
+    legend_bg=_c(0x0F, 0x18, 0x12, 0xCD),
+    legend_border=_c(0xFF, 0xFF, 0xFF, 0x30),
+    legend_key=_c(0x93, 0xDE, 0xA8),
+    legend_text=_c(0xCC, 0xCC, 0xCC),
+    win=_c(0x1E, 0x2A, 0x22),
+    base=_c(0x17, 0x20, 0x18),
+    text=_c(0xE6, 0xEC, 0xE7),
+    button=_c(0x28, 0x38, 0x2C),
+    highlight=_c(0x4C, 0xC0, 0x6A),
+    highlight_text=_c(0x06, 0x1C, 0x0E),
+    panel=_c(0x1F, 0x2B, 0x23),
+    panel_border=_c(0xFF, 0xFF, 0xFF, 0x28),
+)
+
+AMBER = Theme(
+    name="Amber",
+    bg=_c(0x20, 0x1A, 0x14),
+    hit_line=_c(0xFF, 0xFF, 0xFF, 0xAA),
+    hit_glow=_c(0xF5, 0xA7, 0x42),
+    guide=_c(0xFF, 0xFF, 0xFF, 0x12),
+    note_white=_c(0xF5, 0x9E, 0x42),
+    note_black=_c(0xC9, 0x7A, 0x2E),
+    note_border=_c(0x20, 0x15, 0x10),
+    note_text=_c(0x20, 0x10, 0x07),
+    selection=_c(0xFF, 0xFF, 0xFF),
+    key_white=_c(0xEC, 0xE7, 0xE0),
+    key_black=_c(0x24, 0x1D, 0x18),
+    key_active=_c(0xFF, 0xC0, 0x6F),
+    key_border=_c(0x47, 0x3C, 0x34),
+    key_label=_c(0x90, 0x85, 0x78),
+    legend_bg=_c(0x18, 0x12, 0x0D, 0xCD),
+    legend_border=_c(0xFF, 0xFF, 0xFF, 0x30),
+    legend_key=_c(0xF5, 0xC4, 0x8F),
+    legend_text=_c(0xCC, 0xCC, 0xCC),
+    win=_c(0x2A, 0x21, 0x18),
+    base=_c(0x20, 0x1A, 0x14),
+    text=_c(0xEC, 0xE7, 0xE0),
+    button=_c(0x38, 0x30, 0x2A),
+    highlight=_c(0xF5, 0x9E, 0x42),
+    highlight_text=_c(0x20, 0x10, 0x07),
+    panel=_c(0x2B, 0x23, 0x1C),
+    panel_border=_c(0xFF, 0xFF, 0xFF, 0x28),
+)
+
+# Order shown in the settings drawer. Midnight is the default.
+THEMES: dict[str, Theme] = {
+    t.name: t for t in (MIDNIGHT, LIGHT, SLATE, EMERALD, AMBER)
+}
+DEFAULT_THEME_NAME = MIDNIGHT.name
+DEFAULT_THEME = MIDNIGHT
+
+
+def build_palette(theme: Theme) -> QPalette:
+    """A Qt palette for the widgets (drawers, list, buttons) from a theme.
+    Used with the Fusion style so colours apply consistently across platforms."""
+    p = QPalette()
+    disabled = QColor(theme.text)
+    disabled.setAlpha(120)
+    roles = {
+        QPalette.ColorRole.Window: theme.win,
+        QPalette.ColorRole.WindowText: theme.text,
+        QPalette.ColorRole.Base: theme.base,
+        QPalette.ColorRole.AlternateBase: theme.win,
+        QPalette.ColorRole.Text: theme.text,
+        QPalette.ColorRole.Button: theme.button,
+        QPalette.ColorRole.ButtonText: theme.text,
+        QPalette.ColorRole.ToolTipBase: theme.base,
+        QPalette.ColorRole.ToolTipText: theme.text,
+        QPalette.ColorRole.Highlight: theme.highlight,
+        QPalette.ColorRole.HighlightedText: theme.highlight_text,
+        QPalette.ColorRole.PlaceholderText: disabled,
+    }
+    for role, color in roles.items():
+        p.setColor(role, color)
+    for role in (
+        QPalette.ColorRole.WindowText,
+        QPalette.ColorRole.Text,
+        QPalette.ColorRole.ButtonText,
+    ):
+        p.setColor(QPalette.ColorGroup.Disabled, role, disabled)
+    return p
