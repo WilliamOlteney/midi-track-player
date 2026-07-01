@@ -17,10 +17,13 @@ the handle on its edge to show or hide it.
 ## Features
 
 - Open a `.mid` file (file dialog or **drag-and-drop** onto the window)
-- Track list showing **track number · name · event count**, each with a
-  **checkbox**: tick one or more tracks to **play them together and show them on
-  the piano** (they're merged onto a shared time axis and play in sync). By
-  default the first track with notes is ticked. Toggling a checkbox during
+- Track list showing **track number · name · event count**, each row with two
+  **independent toggle icons**: an **eye (👁)** to *show* the track on the piano
+  and a **speaker (🔊)** to *play* its audio. They're separate, so any set of
+  tracks can be shown and any set played — e.g. watch one track fall while
+  hearing another. Bright in the track's colour = on, dim grey = off. Played
+  tracks are merged onto a shared time axis and play in sync; by default the
+  first track with notes is both shown and played. Toggling audio during
   playback keeps the playhead where it is. The **highlighted (current) row** is
   the target for edits
 - Choose any connected **MIDI output** (with **Refresh** for hot-plugging)
@@ -32,8 +35,8 @@ the handle on its edge to show or hide it.
   reapplied so it sounds correct from the new position) with elapsed / total time
 - **Piano** — the always-visible falling-notes view: notes fall onto a piano
   keyboard in sync with playback, keys light up as they sound, notes are
-  labelled with their (bold, outlined) names. The ticked tracks are shown
-  color-coded with the current edit-target track emphasized. **Scroll wheel**
+  labelled with their (bold, outlined) names. The **shown (👁)** tracks are
+  drawn color-coded with the current edit-target track emphasized. **Scroll wheel**
   scrubs the song; **middle-drag** zooms the time window; the main seek bar
   updates it live. Follows Play/Pause/Seek/Speed automatically and runs at
   ~60 fps
@@ -51,9 +54,9 @@ the handle on its edge to show or hide it.
 - **Speed** buttons (0.25× / 0.5× / 0.75× / 1× / 1.5× / 2×), **Loop**, and
   **Mute**
 - **Editing** (track-level): rename, transpose, change instrument, delete a
-  track, or **merge the ticked tracks into one** (their events are interleaved
-  in time and each keeps its channel) — via the Edit menu or right-click on a
-  track. Full **undo/redo**, an
+  track, or **merge the playing (🔊) tracks into one** (their events are
+  interleaved in time and each keeps its channel) — via the Edit menu or
+  right-click on a track. Full **undo/redo**, an
   unsaved-changes (`*`) indicator, and non-destructive **Save As** — the
   original file is never overwritten unless you explicitly choose it
 - Remembers your last-used MIDI output
@@ -84,7 +87,8 @@ python app.py
 
 1. **Open** a `.mid` file (or drag one onto the window) — open the left drawer
    with the edge handle if it's hidden.
-2. **Tick** the track(s) to play (they also appear on the piano) and pick your
+2. Turn on the **speaker (🔊)** for the track(s) you want to hear (and the
+   **eye (👁)** for the ones you want to watch on the piano), then pick your
    **MIDI Output** device.
 3. Press **Play**.
 
@@ -105,8 +109,8 @@ requirements.txt
 
 ## How it works (the parts that matter for reliability)
 
-- **Timing:** each ticked track's events are converted to absolute seconds
-  using a tempo map built from *all* tracks; when several tracks are ticked
+- **Timing:** each played track's events are converted to absolute seconds
+  using a tempo map built from *all* tracks; when several tracks are played
   they're merged into one time-ordered stream, then scheduled on a dedicated
   thread against a monotonic clock (absolute targets, so no drift).
 - **No hanging notes:** Pause/Stop/Loop perform a full "panic" (note-offs +
