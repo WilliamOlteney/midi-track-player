@@ -40,8 +40,10 @@ Built with **PySide6** (UI), **mido** (MIDI file parsing), and
   conductor track)
 - **Speed** buttons (0.25× / 0.5× / 0.75× / 1× / 1.5× / 2×), **Loop**, and
   **Mute**
-- **Editing** (track-level): rename, transpose, change instrument, or delete a
-  track via the Edit menu or right-click on a track. Full **undo/redo**, an
+- **Editing** (track-level): rename, transpose, change instrument, delete a
+  track, or **merge two or more selected tracks into one** (their events are
+  interleaved in time and each keeps its channel) — via the Edit menu or
+  right-click on a track. Full **undo/redo**, an
   unsaved-changes (`*`) indicator, and non-destructive **Save As** — the
   original file is never overwritten unless you explicitly choose it
 - Remembers your last-used MIDI output
