@@ -47,12 +47,22 @@ through (the transparency is adjustable in Settings).
   updates it live. Follows Play/Pause/Seek/Speed automatically and runs at
   ~60 fps
 - **Note editing in the piano** — left-click to select (Ctrl-click for
-  multiple), **Delete** to remove, **drag** to move (pitch + time), drag a note's
-  edge to resize, **Shift-drag** to change velocity (brightness shows it live),
-  and **double-click empty grid to add** a note. Time edits snap to a 1/16 grid
-  (hold **Alt** for free placement); a Shift-drag shows the live velocity value
-  on the note. All undoable, and the playhead stays put. A control legend sits
-  top-right (press **H** to hide/show it)
+  multiple, **drag a box** to marquee-select, **Ctrl+A** all, **Esc** none),
+  **Delete** to remove, **drag** to move (pitch + time), drag a note's edge to
+  resize, **Shift-drag** to change velocity, and **double-click empty grid to
+  add** a note. Edits snap to an **adjustable grid** (1/4…1/32, triplet, dotted)
+  shown as beat/bar lines with bar numbers; hold **Alt** to bypass snap. All
+  undoable, the playhead stays put, and the selection is preserved across edits
+  - **Quantize** (`Q`) snaps selected notes to the grid, with an adjustable
+    strength
+  - **Keyboard**: arrow keys nudge (←/→ by grid, ↑/↓ a semitone, **Shift+↑/↓**
+    an octave), **`[`** / **`]`** halve/double length, **`L`** legato (extend to
+    the next note)
+  - **Clipboard**: **Ctrl+C/X/V** copy/cut/paste (pastes at the playhead) and
+    **Ctrl+D** duplicate
+  - **Selection inspector** (Settings drawer): shows the selection, sets
+    **velocity** numerically, a velocity **ramp** (crescendo), and **humanize**
+  - A control legend sits top-right (press **H** to hide/show it)
 - Faithful playback: Note On/Off, velocity, program changes, control changes,
   pitch bend, sustain pedal, and **tempo changes** — with timing preserved
   exactly (tempo is read from the whole file, even when it lives in a separate
@@ -62,8 +72,9 @@ through (the transparency is adjustable in Settings).
 - **Settings drawer** (right side): a **color scheme** picker (Midnight, Light,
   Slate, Emerald, Amber — recolours the whole UI, piano included), **panel
   opacity** (how transparent the drawers are), piano **fall time** (seconds of
-  upcoming notes shown), **note-name labels** on/off, and the **control legend**
-  on/off. Settings are remembered between runs
+  upcoming notes shown), **note-name labels** on/off, the **control legend**
+  on/off, and an **Editing** section (grid, snap, quantize strength, and the
+  selection inspector). Settings are remembered between runs
 - **Editing** (track-level): rename, transpose, change instrument, delete a
   track, or **merge the playing (🔊) tracks into one** (their events are
   interleaved in time and each keeps its channel) — via the Edit menu or

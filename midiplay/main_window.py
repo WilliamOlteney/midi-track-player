@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSlider,
+    QSpinBox,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -63,10 +64,23 @@ from PySide6.QtWidgets import (
 
 from midiplay import devices, edits, smf, theme as themes
 from midiplay.engine import PlaybackEngine, PlayerState
-from midiplay.piano_view import TRACK_COLORS, PianoRollView
+from midiplay.piano_view import TRACK_COLORS, PianoRollView, note_name
 
 # Note-less tracks (e.g. a conductor/tempo track) are shown greyed out.
 EMPTY_TRACK_COLOR = QColor(0x80, 0x80, 0x80)
+
+# Edit-grid choices for the settings drawer: label -> (note value, modifier).
+GRID_OPTIONS = (
+    ("1/4", (4, "straight")),
+    ("1/8", (8, "straight")),
+    ("1/16", (16, "straight")),
+    ("1/32", (32, "straight")),
+    ("1/8 triplet", (8, "triplet")),
+    ("1/16 triplet", (16, "triplet")),
+    ("1/4 dotted", (4, "dotted")),
+    ("1/8 dotted", (8, "dotted")),
+)
+DEFAULT_GRID_LABEL = "1/16"
 
 # Per-track state stored on each list item: independent "show on the piano"
 # (eye) and "play audio" (speaker) toggles, painted by TrackToggleDelegate.
@@ -494,10 +508,12 @@ class MainWindow(QMainWindow):
         self._roll.notesDeleteRequested.connect(self._delete_notes)
         self._roll.notesEditRequested.connect(self._edit_notes)
         self._roll.noteAddRequested.connect(self._add_note)
+        self._roll.notesAddRequested.connect(self._add_notes)
         self._roll.playPauseRequested.connect(self._toggle_play_pause)
         self._roll.scrubFinished.connect(self.engine.seek)
         self._roll.lookAheadChanged.connect(self._sync_lookahead_slider)
         self._roll.legendToggled.connect(self._sync_legend_check)
+        self._roll.selectionChanged.connect(self._update_inspector)
 
         host = DrawerHost(self._roll)
         self._left_drawer = Drawer(host, controls, side="left", width=340)
@@ -715,8 +731,115 @@ class MainWindow(QMainWindow):
         self.legend_check.toggled.connect(self._on_legend_toggled)
         col.addWidget(self.legend_check)
 
+        col.addWidget(_hline())
+        col.addWidget(QLabel("Editing"))
+        grid_row = QHBoxLayout()
+        self.grid_combo = QComboBox()
+        self.grid_combo.addItems([label for label, _ in GRID_OPTIONS])
+        self.grid_combo.setToolTip("Grid that note edits snap to")
+        self.grid_combo.currentTextChanged.connect(self._on_grid_changed)
+        self.snap_check = QCheckBox("Snap")
+        self.snap_check.setToolTip("Snap edits to the grid (hold Alt to bypass)")
+        self.snap_check.toggled.connect(self._on_snap_toggled)
+        grid_row.addWidget(QLabel("Grid"))
+        grid_row.addWidget(self.grid_combo, stretch=1)
+        grid_row.addWidget(self.snap_check)
+        col.addLayout(grid_row)
+
+        quant_row = QHBoxLayout()
+        self.quant_slider = QSlider(Qt.Orientation.Horizontal)
+        self.quant_slider.setRange(0, 100)   # quantize strength percent
+        self.quant_slider.setToolTip("How strongly Quantize pulls notes to the grid")
+        self.quant_slider.valueChanged.connect(self._on_quant_strength_changed)
+        self.quant_label = QLabel()
+        self.quantize_button = QPushButton("Quantize")
+        self.quantize_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.quantize_button.setToolTip("Snap selected notes to the grid (Q)")
+        self.quantize_button.clicked.connect(lambda: self._roll.quantize_selection())
+        quant_row.addWidget(QLabel("Quantize"))
+        quant_row.addWidget(self.quant_slider, stretch=1)
+        quant_row.addWidget(self.quant_label)
+        col.addLayout(quant_row)
+        col.addWidget(self.quantize_button)
+
+        # Selection inspector.
+        self.sel_label = QLabel("No selection")
+        col.addWidget(self.sel_label)
+        vel_row = QHBoxLayout()
+        self.vel_spin = QSpinBox()
+        self.vel_spin.setRange(1, 127)
+        self.vel_spin.setToolTip("Velocity for the selected notes")
+        self.vel_set_button = QPushButton("Set vel")
+        self.vel_set_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.vel_set_button.clicked.connect(
+            lambda: self._roll.set_velocity_selection(self.vel_spin.value())
+        )
+        vel_row.addWidget(QLabel("Velocity"))
+        vel_row.addWidget(self.vel_spin, stretch=1)
+        vel_row.addWidget(self.vel_set_button)
+        col.addLayout(vel_row)
+
+        tools_row = QHBoxLayout()
+        self.ramp_button = QPushButton("Ramp ↗")
+        self.ramp_button.setToolTip("Crescendo across the selection up to the velocity value")
+        self.ramp_button.clicked.connect(
+            lambda: self._roll.ramp_velocity_selection(40, self.vel_spin.value())
+        )
+        self.humanize_button = QPushButton("Humanize")
+        self.humanize_button.setToolTip("Nudge selected timing + velocity slightly")
+        self.humanize_button.clicked.connect(lambda: self._roll.humanize_selection())
+        self.legato_button = QPushButton("Legato")
+        self.legato_button.setToolTip("Extend selected notes to the next note (L)")
+        self.legato_button.clicked.connect(lambda: self._roll.legato_selection())
+        for b in (self.ramp_button, self.humanize_button, self.legato_button):
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            tools_row.addWidget(b)
+        col.addLayout(tools_row)
+
+        # Buttons that need a selection to act on.
+        self._selection_widgets = [
+            self.vel_spin, self.vel_set_button, self.ramp_button,
+            self.humanize_button, self.legato_button, self.quantize_button,
+        ]
+
         col.addStretch(1)
         return panel
+
+    def _on_grid_changed(self, label: str) -> None:
+        for text, (denom, mod) in GRID_OPTIONS:
+            if text == label:
+                self._roll.set_grid(denom, mod)
+                self._settings.setValue("grid", label)
+                break
+
+    def _on_snap_toggled(self, on: bool) -> None:
+        self._roll.set_snap(on)
+        self._settings.setValue("snap", on)
+
+    def _on_quant_strength_changed(self, percent: int) -> None:
+        self.quant_label.setText(f"{percent}%")
+        self._roll.set_quantize_strength(percent / 100.0)
+        self._settings.setValue("quant_strength", percent)
+
+    def _update_inspector(self) -> None:
+        notes = self._roll.selected_notes()
+        has = bool(notes)
+        for w in self._selection_widgets:
+            w.setEnabled(has)
+        if not has:
+            self.sel_label.setText("No selection")
+            return
+        if len(notes) == 1:
+            n = notes[0]
+            self.sel_label.setText(
+                f"1 note · {note_name(n['pitch'])} · vel {n['velocity']}"
+            )
+        else:
+            self.sel_label.setText(f"{len(notes)} notes selected")
+        avg = round(sum(n["velocity"] for n in notes) / len(notes))
+        self.vel_spin.blockSignals(True)
+        self.vel_spin.setValue(max(1, min(127, avg)))
+        self.vel_spin.blockSignals(False)
 
     def _panel_style(self, alpha: int, side: str) -> str:
         """Stylesheet for a drawer panel: a translucent background (in the
@@ -796,19 +919,34 @@ class MainWindow(QMainWindow):
         legend = self._settings.value("legend", True, type=bool)
         theme_name = self._settings.value("theme", themes.DEFAULT_THEME_NAME)
         theme = themes.THEMES.get(theme_name, themes.DEFAULT_THEME)
+        grid_labels = [label for label, _ in GRID_OPTIONS]
+        grid_label = self._settings.value("grid", DEFAULT_GRID_LABEL)
+        if grid_label not in grid_labels:
+            grid_label = DEFAULT_GRID_LABEL
+        snap = self._settings.value("snap", True, type=bool)
+        quant = max(0, min(100, int(self._settings.value("quant_strength", 100))))
 
         self.theme_combo.setCurrentText(theme.name)
         self.opacity_slider.setValue(opacity)
         self.lookahead_slider.setValue(look_ahead)
         self.labels_check.setChecked(labels)
         self.legend_check.setChecked(legend)
+        self.grid_combo.setCurrentText(grid_label)
+        self.snap_check.setChecked(snap)
+        self.quant_slider.setValue(quant)
 
         self.opacity_label.setText(f"{opacity}%")
         self.lookahead_label.setText(f"{look_ahead}s")
+        self.quant_label.setText(f"{quant}%")
         self._apply_theme(theme)  # palette + piano + panels (uses opacity above)
         self._roll.set_look_ahead(float(look_ahead))
         self._roll.set_labels_visible(labels)
         self._roll.set_legend_visible(legend)
+        denom, mod = dict(GRID_OPTIONS)[grid_label]
+        self._roll.set_grid(denom, mod)
+        self._roll.set_snap(snap)
+        self._roll.set_quantize_strength(quant / 100.0)
+        self._update_inspector()  # disable selection widgets until something is picked
 
     # -- File loading -----------------------------------------------------
     def _choose_file(self) -> None:
@@ -1141,6 +1279,13 @@ class MainWindow(QMainWindow):
             return
         pitch, start_tick = payload
         self._apply_track_edit(index, lambda m: edits.add_note(m, index, pitch, start_tick))
+
+    def _add_notes(self, payload) -> None:
+        """Add several notes (paste/duplicate) to the selected track."""
+        index = self.selected_track_index()
+        if index is None or not payload:
+            return
+        self._apply_track_edit(index, lambda m: edits.add_notes(m, index, list(payload)))
 
     def _refresh_piano_view(self, *_args) -> None:
         """Show the eye-on tracks on the piano, color-coded, with the current

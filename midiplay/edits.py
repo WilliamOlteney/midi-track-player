@@ -228,6 +228,35 @@ def add_note(
     _rebuild_track(track, abs_events)
 
 
+def add_notes(midi: mido.MidiFile, index: int, notes) -> None:
+    """Add several notes to a track in one pass (e.g. paste/duplicate).
+
+    `notes` is an iterable of (pitch, start_tick, length, velocity). Each is
+    clamped to sane ranges; all use the track's existing channel (or 0)."""
+    track = midi.tracks[index]
+    channel = _track_channel(track)
+    beat = midi.ticks_per_beat
+
+    abs_events: list[tuple[int, mido.Message]] = []
+    tick = 0
+    for msg in track:
+        tick += msg.time
+        abs_events.append((tick, msg))
+
+    for pitch, start_tick, length, velocity in notes:
+        pitch = max(0, min(127, int(pitch)))
+        start_tick = max(0, int(start_tick))
+        length = max(1, int(length) if length else beat)
+        velocity = max(1, min(127, int(velocity)))
+        abs_events.append(
+            (start_tick, mido.Message("note_on", note=pitch, velocity=velocity, channel=channel))
+        )
+        abs_events.append(
+            (start_tick + length, mido.Message("note_off", note=pitch, velocity=0, channel=channel))
+        )
+    _rebuild_track(track, abs_events)
+
+
 def merge_tracks(midi: mido.MidiFile, indices) -> int:
     """Merge two or more tracks into one, replacing them with a single track
     at the position of the earliest selected. Returns the merged track's index.

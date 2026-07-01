@@ -8,6 +8,7 @@ track or all tracks color-coded (with the played track emphasized).
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal
@@ -102,10 +103,12 @@ class PianoRollView(QWidget):
     scrubMoved = Signal(float)       # live song position while scrubbing
     scrubFinished = Signal(float)    # final song position on release
     notesDeleteRequested = Signal(object)  # set of note ids to delete
-    notesEditRequested = Signal(object)    # {id: (start_tick, end_tick, pitch)}
+    notesEditRequested = Signal(object)    # {id: (start_tick, end_tick, pitch, velocity)}
     noteAddRequested = Signal(object)      # (pitch, start_tick)
+    notesAddRequested = Signal(object)     # [(pitch, start_tick, length, velocity), …]
     playPauseRequested = Signal()
     legendToggled = Signal(bool)           # legend shown/hidden (e.g. via 'H')
+    selectionChanged = Signal()            # the set of selected notes changed
 
     def __init__(self) -> None:
         super().__init__()
@@ -129,6 +132,16 @@ class PianoRollView(QWidget):
         self._show_legend = True   # toggled with 'H' or the settings drawer
         self._labels_visible = True  # note-name labels on the falling notes
         self._theme = DEFAULT_THEME  # colour scheme (set via set_theme)
+
+        # Editing: grid / snap / clipboard / marquee selection.
+        self._grid_denom = 16          # note value for the grid: 4, 8, 16, 32
+        self._grid_mod = "straight"    # "straight" | "triplet" | "dotted"
+        self._snap = True              # snap edits to the grid (Alt inverts)
+        self._quant_strength = 1.0     # 0..1 pull toward the grid on Quantize
+        self._clipboard: list = []     # [(pitch, rel_start_tick, length, velocity)]
+        self._pending_selection = None  # selection to restore after an edit reload
+        self._marquee = None           # (start, current) QPointF while box-selecting
+        self._press_pos = None         # left-press point (to tell a click from a drag)
 
         # Scrubbing: while active, the engine's position is ignored and the
         # view follows the scrub position instead.
@@ -174,6 +187,42 @@ class PianoRollView(QWidget):
         self._theme = theme
         self.update()
 
+    def set_grid(self, denom: int, mod: str = "straight") -> None:
+        """Set the edit grid to a 1/`denom` note ('straight', 'triplet', or
+        'dotted')."""
+        self._grid_denom = int(denom)
+        self._grid_mod = mod
+        self.update()
+
+    def set_snap(self, on: bool) -> None:
+        self._snap = bool(on)
+
+    def snap_enabled(self) -> bool:
+        return self._snap
+
+    def set_quantize_strength(self, strength: float) -> None:
+        self._quant_strength = max(0.0, min(1.0, float(strength)))
+
+    def _set_selection(self, ids) -> None:
+        """Replace the selection and notify listeners (e.g. the inspector)."""
+        new = set(ids)
+        if new != self._selected:
+            self._selected = new
+            self.selectionChanged.emit()
+            self.update()
+
+    def selected_notes(self) -> list[dict]:
+        """Details of the currently-selected (editable) notes, for the inspector."""
+        out = []
+        for v in self._vnotes:
+            if not v.dim and v.note.id in self._selected:
+                n = v.note
+                out.append({
+                    "id": n.id, "pitch": n.pitch, "velocity": n.velocity,
+                    "start_tick": n.start_tick, "end_tick": n.end_tick,
+                })
+        return out
+
     def wheelEvent(self, event) -> None:
         # Scroll wheel scrubs the song position (seek on each notch).
         step = self._look_ahead * 0.12
@@ -198,9 +247,9 @@ class PianoRollView(QWidget):
             for n in notes
         ]
         self._duration = duration
-        self._selected.clear()
         self._overlay.clear()
         self._drag = None
+        self._apply_pending_selection()
         self._set_range([n.pitch for n in notes])
         self.update()
 
@@ -221,11 +270,19 @@ class PianoRollView(QWidget):
                 self._vnotes.append(_VNote(n, color, dim))
                 pitches.append(n.pitch)
         self._duration = duration
-        self._selected.clear()
         self._overlay.clear()
         self._drag = None
+        self._apply_pending_selection()
         self._set_range(pitches)
         self.update()
+
+    def _apply_pending_selection(self) -> None:
+        """After notes are (re)loaded, restore a pending selection (set by an
+        edit command so it survives the reload) or clear it."""
+        valid = {v.note.id for v in self._vnotes if not v.dim}
+        self._selected = (self._pending_selection or set()) & valid
+        self._pending_selection = None
+        self.selectionChanged.emit()
 
     def _set_range(self, pitches: list[int]) -> None:
         """Choose the visible keyboard range from the notes' pitches."""
@@ -276,7 +333,8 @@ class PianoRollView(QWidget):
             super().mousePressEvent(event)
 
     def _left_press(self, event) -> None:
-        """Select a note (Ctrl toggles), and arm a move/resize drag."""
+        """Select a note (Ctrl toggles), arm a move/resize drag, or start a
+        marquee (drag-box) selection on empty grid."""
         pos = event.position()
         self.setFocus()
         if pos.y() > self.height() - self._keyboard_height():
@@ -284,17 +342,19 @@ class PianoRollView(QWidget):
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         vnote = self._hit_test(pos)
         if vnote is None:
-            if not ctrl:
-                self._selected.clear()
+            # Begin a marquee; base is the current selection when Ctrl-adding.
+            self._marquee = {
+                "start": pos, "cur": pos,
+                "base": set(self._selected) if ctrl else set(),
+            }
             self.update()
             return
         note_id = vnote.note.id
         if ctrl:
-            self._selected ^= {note_id}
-            self.update()
+            self._set_selection(self._selected ^ {note_id})
             return
         if note_id not in self._selected:
-            self._selected = {note_id}
+            self._set_selection({note_id})
         if self._time_map is not None:
             shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             mode = "velocity" if shift else self._edge_mode(vnote, pos)
@@ -361,14 +421,21 @@ class PianoRollView(QWidget):
         return self._snap_tick(self._time_map.seconds_to_ticks(seconds), no_snap)
 
     def _snap_tick(self, tick: float, no_snap: bool) -> int:
-        if no_snap:
+        # Alt (no_snap) inverts the persistent snap setting per-gesture.
+        if no_snap or not self._snap:
             return max(0, int(round(tick)))
         grid = self._grid_ticks()
         return max(0, int(round(tick / grid)) * grid)
 
     def _grid_ticks(self) -> int:
         tpb = self._time_map.ticks_per_beat if self._time_map else 480
-        return max(1, tpb // 4)  # 1/16-note grid
+        # A 1/denom note is tpb*4/denom ticks (a beat = a 1/4 note = tpb).
+        ticks = tpb * 4 / max(1, self._grid_denom)
+        if self._grid_mod == "triplet":
+            ticks *= 2 / 3
+        elif self._grid_mod == "dotted":
+            ticks *= 3 / 2
+        return max(1, int(round(ticks)))
 
     def _pitch_at_x(self, x: float) -> int:
         geo, _ = self._key_geometry(self.width())
@@ -386,13 +453,26 @@ class PianoRollView(QWidget):
         for nid, new in self._overlay.items():
             old = self._drag["orig"].get(nid)
             if old is not None and tuple(new) != tuple(old):
-                changes[nid] = new  # (start_tick, end_tick, pitch)
+                changes[nid] = new  # (start_tick, end_tick, pitch, velocity)
         self._drag = None
         if changes:
-            self.notesEditRequested.emit(changes)
+            self._emit_changes(changes)
         else:
             self._overlay.clear()
             self.update()
+
+    def _emit_changes(self, changes: dict) -> None:
+        """Emit a note edit and remember where each edited note moves to, so the
+        selection follows it after the track is rebuilt and reloaded."""
+        pending = set()
+        for sid in self._selected:
+            if sid in changes:
+                new_start, _new_end, new_pitch, _vel = changes[sid]
+                pending.add((sid[0], new_pitch, new_start))  # (channel, pitch, start)
+            else:
+                pending.add(sid)
+        self._pending_selection = pending
+        self.notesEditRequested.emit(changes)
 
     def mouseDoubleClickEvent(self, event) -> None:
         """Double-click empty grid to add a note (snapped, on the played track)."""
@@ -418,19 +498,49 @@ class PianoRollView(QWidget):
         return self._snap_tick(self._time_map.seconds_to_ticks(seconds), no_snap)
 
     def keyPressEvent(self, event) -> None:
-        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self._selected:
+        key = event.key()
+        mods = event.modifiers()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+
+        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self._selected:
             self.notesDeleteRequested.emit(set(self._selected))
-            event.accept()
-        elif event.key() == Qt.Key.Key_H:
+        elif ctrl and key == Qt.Key.Key_A:
+            self.select_all()
+        elif key == Qt.Key.Key_Escape:
+            self.clear_selection()
+        elif ctrl and key == Qt.Key.Key_C:
+            self.copy_selection()
+        elif ctrl and key == Qt.Key.Key_X:
+            self.cut_selection()
+        elif ctrl and key == Qt.Key.Key_V:
+            self.paste_clipboard()
+        elif ctrl and key == Qt.Key.Key_D:
+            self.duplicate_selection()
+        elif key == Qt.Key.Key_Q:
+            self.quantize_selection()
+        elif key == Qt.Key.Key_L and self._selected:
+            self.legato_selection()
+        elif key in (Qt.Key.Key_Left, Qt.Key.Key_Right) and self._selected:
+            step = self._grid_ticks() * (1 if key == Qt.Key.Key_Right else -1)
+            self.nudge_selection(step, 0)
+        elif key in (Qt.Key.Key_Up, Qt.Key.Key_Down) and self._selected:
+            semis = (12 if shift else 1) * (1 if key == Qt.Key.Key_Up else -1)
+            self.nudge_selection(0, semis)
+        elif key in (Qt.Key.Key_BracketLeft, Qt.Key.Key_Comma) and self._selected:
+            self.scale_length_selection(0.5)
+        elif key in (Qt.Key.Key_BracketRight, Qt.Key.Key_Period) and self._selected:
+            self.scale_length_selection(2.0)
+        elif key == Qt.Key.Key_H:
             self._show_legend = not self._show_legend
             self.legendToggled.emit(self._show_legend)
             self.update()
-            event.accept()
-        elif event.key() == Qt.Key.Key_Space:
+        elif key == Qt.Key.Key_Space:
             self.playPauseRequested.emit()
-            event.accept()
         else:
             super().keyPressEvent(event)
+            return
+        event.accept()
 
     def mouseMoveEvent(self, event) -> None:
         if self._zooming:
@@ -440,6 +550,10 @@ class PianoRollView(QWidget):
             event.accept()
         elif self._drag is not None:
             self._update_drag(event)
+            event.accept()
+        elif self._marquee is not None:
+            self._marquee["cur"] = event.position()
+            self.update()
             event.accept()
         else:
             super().mouseMoveEvent(event)
@@ -452,8 +566,179 @@ class PianoRollView(QWidget):
         elif event.button() == Qt.MouseButton.LeftButton and self._drag is not None:
             self._finish_drag()
             event.accept()
+        elif event.button() == Qt.MouseButton.LeftButton and self._marquee is not None:
+            self._finish_marquee()
+            event.accept()
         else:
             super().mouseReleaseEvent(event)
+
+    def _finish_marquee(self) -> None:
+        m = self._marquee
+        self._marquee = None
+        rect = QRectF(m["start"], m["cur"]).normalized()
+        if rect.width() < 3 and rect.height() < 3:
+            # A click, not a drag: clear the selection (base is empty unless Ctrl).
+            self._set_selection(m["base"])
+            return
+        enclosed = {v.note.id for v in self._marquee_hits(rect)}
+        self._set_selection(m["base"] | enclosed)
+
+    def _marquee_hits(self, rect: QRectF):
+        """Editable vnotes whose on-screen rect intersects the marquee rect."""
+        notes_bottom = self.height() - self._keyboard_height()
+        geo, _ = self._key_geometry(self.width())
+        hits = []
+        for vnote in self._vnotes:
+            if vnote.dim:
+                continue
+            r = self._note_rect(vnote.note, geo, notes_bottom)
+            if r is not None and rect.intersects(r):
+                hits.append(vnote)
+        return hits
+
+    # -- Editing commands (selection is preserved across the reload) ------
+    def _editable_notes(self) -> list[Note]:
+        return [v.note for v in self._vnotes if not v.dim]
+
+    def _selected_editable(self) -> list[Note]:
+        return [n for n in self._editable_notes() if n.id in self._selected]
+
+    def _primary_channel(self):
+        for v in self._vnotes:
+            if not v.dim:
+                return v.note.channel
+        return None
+
+    def select_all(self) -> None:
+        self._set_selection({n.id for n in self._editable_notes()})
+
+    def clear_selection(self) -> None:
+        self._set_selection(set())
+
+    def quantize_selection(self) -> None:
+        """Pull selected note starts toward the grid by the strength setting
+        (length preserved)."""
+        grid = self._grid_ticks()
+        strength = self._quant_strength
+        changes = {}
+        for n in self._selected_editable():
+            target = int(round(n.start_tick / grid)) * grid
+            new_start = max(0, int(round(n.start_tick + (target - n.start_tick) * strength)))
+            length = n.end_tick - n.start_tick
+            changes[n.id] = (new_start, new_start + length, n.pitch, n.velocity)
+        if changes:
+            self._emit_changes(changes)
+
+    def nudge_selection(self, d_tick: int, d_pitch: int) -> None:
+        changes = {}
+        for n in self._selected_editable():
+            new_start = max(0, n.start_tick + d_tick)
+            length = n.end_tick - n.start_tick
+            new_pitch = max(0, min(127, n.pitch + d_pitch))
+            changes[n.id] = (new_start, new_start + length, new_pitch, n.velocity)
+        if changes:
+            self._emit_changes(changes)
+
+    def scale_length_selection(self, factor: float) -> None:
+        grid = self._grid_ticks()
+        changes = {}
+        for n in self._selected_editable():
+            length = max(grid, int(round((n.end_tick - n.start_tick) * factor)))
+            changes[n.id] = (n.start_tick, n.start_tick + length, n.pitch, n.velocity)
+        if changes:
+            self._emit_changes(changes)
+
+    def legato_selection(self) -> None:
+        """Extend each selected note to the start of the next note in time."""
+        starts = sorted({n.start_tick for n in self._editable_notes()})
+        changes = {}
+        for n in self._selected_editable():
+            later = [s for s in starts if s > n.start_tick]
+            if later and later[0] > n.start_tick:
+                changes[n.id] = (n.start_tick, later[0], n.pitch, n.velocity)
+        if changes:
+            self._emit_changes(changes)
+
+    def set_velocity_selection(self, velocity: int) -> None:
+        velocity = max(1, min(127, int(velocity)))
+        changes = {}
+        for n in self._selected_editable():
+            changes[n.id] = (n.start_tick, n.end_tick, n.pitch, velocity)
+        if changes:
+            self._emit_changes(changes)
+
+    def ramp_velocity_selection(self, v0: int, v1: int) -> None:
+        notes = sorted(self._selected_editable(), key=lambda n: n.start_tick)
+        if not notes:
+            return
+        changes = {}
+        span = max(1, len(notes) - 1)
+        for i, n in enumerate(notes):
+            v = int(round(v0 + (v1 - v0) * i / span))
+            changes[n.id] = (n.start_tick, n.end_tick, n.pitch, max(1, min(127, v)))
+        self._emit_changes(changes)
+
+    def humanize_selection(self, time_ticks: int = 15, vel_amount: int = 12) -> None:
+        changes = {}
+        for n in self._selected_editable():
+            dt = random.randint(-time_ticks, time_ticks)
+            dv = random.randint(-vel_amount, vel_amount)
+            new_start = max(0, n.start_tick + dt)
+            length = n.end_tick - n.start_tick
+            vel = max(1, min(127, n.velocity + dv))
+            changes[n.id] = (new_start, new_start + length, n.pitch, vel)
+        if changes:
+            self._emit_changes(changes)
+
+    # -- Clipboard --------------------------------------------------------
+    def copy_selection(self) -> None:
+        notes = self._selected_editable()
+        if not notes:
+            return
+        base = min(n.start_tick for n in notes)
+        self._clipboard = [
+            (n.pitch, n.start_tick - base, n.end_tick - n.start_tick, n.velocity)
+            for n in notes
+        ]
+
+    def cut_selection(self) -> None:
+        if not self._selected:
+            return
+        self.copy_selection()
+        self.notesDeleteRequested.emit(set(self._selected))
+
+    def paste_clipboard(self) -> None:
+        if not self._clipboard or self._time_map is None:
+            return
+        base = self._snap_tick(
+            self._time_map.seconds_to_ticks(self._position), no_snap=False
+        )
+        self._add_notes_at(base)
+
+    def duplicate_selection(self) -> None:
+        notes = self._selected_editable()
+        if not notes:
+            return
+        min_s = min(n.start_tick for n in notes)
+        max_e = max(n.end_tick for n in notes)
+        span = max_e - min_s
+        payload = [
+            (n.pitch, n.start_tick - min_s, n.end_tick - n.start_tick, n.velocity)
+            for n in notes
+        ]
+        self._add_notes_at(min_s + span, payload)
+
+    def _add_notes_at(self, base_tick: int, payload=None) -> None:
+        """Add notes (clipboard or `payload` of (pitch, rel_start, len, vel)) at
+        base_tick, then select the new copies once they reload."""
+        payload = self._clipboard if payload is None else payload
+        notes = [(p, base_tick + rs, ln, vel) for (p, rs, ln, vel) in payload]
+        channel = self._primary_channel()
+        if channel is not None:
+            self._pending_selection = {
+                (channel, p, base_tick + rs) for (p, rs, _ln, _vel) in payload
+            }
+        self.notesAddRequested.emit(notes)
 
     # -- Geometry ---------------------------------------------------------
     def _keyboard_height(self) -> int:
@@ -502,11 +787,59 @@ class PianoRollView(QWidget):
             if v.note.start <= self._position < v.note.end
         }
         geo, _white_w = self._key_geometry(width)
+        self._draw_grid(painter, width, notes_bottom)
         self._draw_guides(painter, geo, notes_bottom)
         self._draw_notes(painter, geo, notes_bottom, active)
+        self._draw_marquee(painter)
         self._draw_hit_line(painter, width, notes_bottom)
         self._draw_keyboard(painter, geo, notes_bottom, kb_height, active)
         self._draw_legend(painter, width)
+
+    def _draw_grid(self, painter, width, notes_bottom) -> None:
+        """Horizontal beat/bar lines (and grid subdivisions when not too dense)
+        across the falling-notes area. Assumes 4/4."""
+        if self._time_map is None or notes_bottom <= 0:
+            return
+        grid = self._grid_ticks()
+        tpb = self._time_map.ticks_per_beat
+        beat, bar = tpb, tpb * 4
+        end_sec = self._position + self._look_ahead
+        start_tick = self._time_map.seconds_to_ticks(self._position)
+        tick = max(0, int(start_tick // grid) * grid)
+        # Pixels between adjacent grid lines — skip sub-lines if they'd be dense.
+        sub_px = notes_bottom * (self._time_map.tick_to_seconds(tick + grid)
+                                 - self._time_map.tick_to_seconds(tick)) / self._look_ahead
+        g = self._theme.guide
+        sub_c = QColor(g.red(), g.green(), g.blue(), min(255, g.alpha()))
+        beat_c = QColor(g.red(), g.green(), g.blue(), min(255, g.alpha() * 2 + 12))
+        bar_c = QColor(g.red(), g.green(), g.blue(), min(255, g.alpha() * 4 + 30))
+        guard = 0
+        while guard < 20000:
+            guard += 1
+            sec = self._time_map.tick_to_seconds(tick)
+            if sec > end_sec:
+                break
+            y = self._time_to_y(sec, notes_bottom)
+            if 0 <= y <= notes_bottom:
+                on_bar = tick % bar == 0
+                on_beat = tick % beat == 0
+                if on_bar or on_beat or sub_px >= 7:
+                    painter.setPen(QPen(bar_c if on_bar else beat_c if on_beat else sub_c, 1))
+                    painter.drawLine(0, int(y), width, int(y))
+                    if on_bar:
+                        painter.setPen(QPen(self._theme.key_label))
+                        painter.drawText(QPointF(3, y - 2), str(tick // bar + 1))
+            tick += grid
+
+    def _draw_marquee(self, painter) -> None:
+        if self._marquee is None:
+            return
+        rect = QRectF(self._marquee["start"], self._marquee["cur"]).normalized()
+        fill = QColor(self._theme.selection)
+        fill.setAlpha(40)
+        painter.setPen(QPen(self._theme.selection, 1, Qt.PenStyle.DashLine))
+        painter.setBrush(fill)
+        painter.drawRect(rect)
 
     def _draw_legend(self, painter, width) -> None:
         if not self._show_legend:
