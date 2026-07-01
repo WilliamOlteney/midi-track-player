@@ -22,6 +22,10 @@ through (the transparency is adjustable in Settings).
 
 ## Features
 
+- Starts with a **new blank file** open (a conductor + one empty track) so you
+  can record or draw immediately. **New** (Ctrl+N) makes another; **Add Track**
+  adds more (each on its own channel). Switching away from unsaved edits prompts
+  to save first
 - Open a `.mid` file (file dialog or **drag-and-drop** onto the window)
 - Track list showing **track number · name · event count**, each row with two
   **independent toggle icons**: an **eye (👁)** to *show* the track on the piano
@@ -37,6 +41,12 @@ through (the transparency is adjustable in Settings).
   played track onto one channel. Set this to your keyboard's receive channel if
   only some tracks make sound (single-channel devices ignore other channels)
 - Transport: **Play / Pause / Stop / Restart** (Spacebar toggles play/pause)
+- **Record** from a **MIDI input** (keyboard/controller) into the highlighted
+  track (**● Rec**): plays the other tracks for context, echoes your input to
+  the output (**monitor/thru**), and **overdubs** what you play. Optional
+  **metronome** and **count-in** (bars). Fully undoable. The metronome click is
+  sent to your MIDI output on the GM percussion channel, so it needs an audible
+  output (internal sound isn't built in yet)
 - **Click-to-seek** progress bar (click or drag to jump; instrument state is
   reapplied so it sounds correct from the new position) with elapsed / total time
 - **Piano** — the always-visible falling-notes view: notes fall onto a piano
@@ -81,16 +91,17 @@ through (the transparency is adjustable in Settings).
   Slate, Emerald, Amber — recolours the whole UI, piano included), **panel
   opacity** (how transparent the drawers are), piano **fall time** (seconds of
   upcoming notes shown), **note-name labels** on/off, the **control legend**
-  on/off, and an **Editing** section (grid, snap, quantize strength, draw mode,
-  velocity lane, scale/key lock, and the selection inspector). Settings are
+  on/off, an **Editing** section (grid, snap, quantize strength, draw mode,
+  velocity lane, scale/key lock, and the selection inspector), and a
+  **Recording** section (monitor/thru, metronome, count-in bars). Settings are
   remembered between runs
-- **Editing** (track-level): rename, transpose, change instrument, delete a
-  track, or **merge the playing (🔊) tracks into one** (their events are
+- **Editing** (track-level): rename, transpose, change instrument, **add** a
+  track, delete a track, or **merge the playing (🔊) tracks into one** (their events are
   interleaved in time and each keeps its channel) — via the Edit menu or
   right-click on a track. Full **undo/redo**, an
   unsaved-changes (`*`) indicator, and non-destructive **Save As** — the
   original file is never overwritten unless you explicitly choose it
-- Remembers your last-used MIDI output
+- Remembers your last-used MIDI output and input
 - No stuck notes: pausing/stopping releases held notes, resets sustain, and
   sends all-notes-off / all-sound-off
 
@@ -123,6 +134,11 @@ python app.py
    **MIDI Output** device.
 3. Press **Play**.
 
+To **record**: pick a **MIDI Input**, highlight the track to record into, and
+press **● Rec** (set a count-in/metronome first in Settings ▸ Recording if you
+like). Press **● Rec** or **Stop** to finish — what you played is overdubbed
+into the track.
+
 ## Project layout
 
 ```
@@ -130,7 +146,8 @@ app.py                 entry point — python app.py
 midiplay/
   __init__.py
   smf.py               MIDI file loading, track info, tempo map + timing, notes
-  devices.py           MIDI output enumeration / connection (rtmidi backend)
+  devices.py           MIDI input/output enumeration + connection (rtmidi)
+  recorder.py          capture MIDI input to a track while the transport plays
   engine.py            playback engine: scheduling, transport, seek, panic
   edits.py             track edit operations (rename/transpose/instrument/delete)
   theme.py             UI color schemes (piano colours + widget palettes)

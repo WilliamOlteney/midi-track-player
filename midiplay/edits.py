@@ -92,6 +92,23 @@ def delete_track(midi: mido.MidiFile, index: int) -> None:
     del midi.tracks[index]
 
 
+def add_track(midi: mido.MidiFile, name: str | None = None, channel: int | None = None) -> int:
+    """Append a new empty track (named, with a program_change) and return its
+    index. The channel defaults to the new track's position, so successive
+    tracks get distinct channels."""
+    index = len(midi.tracks)
+    if channel is None:
+        channel = max(0, index - 1) % 16
+    if name is None:
+        name = f"Track {index}"
+    track = mido.MidiTrack()
+    track.append(mido.MetaMessage("track_name", name=name, time=0))
+    track.append(mido.Message("program_change", program=0, channel=channel, time=0))
+    track.append(mido.MetaMessage("end_of_track", time=0))
+    midi.tracks.append(track)
+    return index
+
+
 def track_program(track: mido.MidiTrack) -> int:
     """Current program of a track (first program_change), or 0."""
     for msg in track:
@@ -254,6 +271,46 @@ def add_notes(midi: mido.MidiFile, index: int, notes) -> None:
         abs_events.append(
             (start_tick + length, mido.Message("note_off", note=pitch, velocity=0, channel=channel))
         )
+    _rebuild_track(track, abs_events)
+
+
+def insert_recorded(midi: mido.MidiFile, index: int, timed_msgs) -> None:
+    """Merge recorded (abs_tick, message) events into a track (overdub).
+
+    Each message is placed at its tick with the track's channel; note-ons still
+    held at the end (e.g. a key down when recording stopped) are closed with a
+    note-off at the last tick so nothing hangs. Meta messages are ignored."""
+    track = midi.tracks[index]
+    channel = _track_channel(track)
+
+    abs_events: list[tuple[int, mido.Message]] = []
+    tick = 0
+    for msg in track:
+        tick += msg.time
+        abs_events.append((tick, msg))
+
+    max_tick = max([t for t, _ in abs_events] + [0])
+    open_notes: dict[int, int] = {}  # pitch -> number of note-ons still open
+    for t, msg in timed_msgs:
+        if msg.is_meta:
+            continue
+        m = msg.copy(time=0)
+        if hasattr(m, "channel"):
+            m.channel = channel
+        t = max(0, int(t))
+        max_tick = max(max_tick, t)
+        abs_events.append((t, m))
+        if m.type == "note_on" and m.velocity > 0:
+            open_notes[m.note] = open_notes.get(m.note, 0) + 1
+        elif m.type == "note_off" or (m.type == "note_on" and m.velocity == 0):
+            if open_notes.get(m.note):
+                open_notes[m.note] -= 1
+
+    for pitch, count in open_notes.items():
+        for _ in range(count):
+            abs_events.append(
+                (max_tick, mido.Message("note_off", note=pitch, velocity=0, channel=channel))
+            )
     _rebuild_track(track, abs_events)
 
 
