@@ -82,6 +82,19 @@ GRID_OPTIONS = (
 )
 DEFAULT_GRID_LABEL = "1/16"
 
+# Scale/key-lock choices: name -> allowed pitch classes relative to the root.
+SCALES = {
+    "Major": frozenset({0, 2, 4, 5, 7, 9, 11}),
+    "Natural minor": frozenset({0, 2, 3, 5, 7, 8, 10}),
+    "Harmonic minor": frozenset({0, 2, 3, 5, 7, 8, 11}),
+    "Dorian": frozenset({0, 2, 3, 5, 7, 9, 10}),
+    "Pentatonic major": frozenset({0, 2, 4, 7, 9}),
+    "Pentatonic minor": frozenset({0, 3, 5, 7, 10}),
+    "Blues": frozenset({0, 3, 5, 6, 7, 10}),
+    "Chromatic": frozenset(range(12)),
+}
+SCALE_ROOTS = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+
 # Per-track state stored on each list item: independent "show on the piano"
 # (eye) and "play audio" (speaker) toggles, painted by TrackToggleDelegate.
 SHOW_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -514,6 +527,7 @@ class MainWindow(QMainWindow):
         self._roll.lookAheadChanged.connect(self._sync_lookahead_slider)
         self._roll.legendToggled.connect(self._sync_legend_check)
         self._roll.selectionChanged.connect(self._update_inspector)
+        self._roll.trackRetargetRequested.connect(self._on_retarget)
 
         host = DrawerHost(self._roll)
         self._left_drawer = Drawer(host, controls, side="left", width=340)
@@ -802,8 +816,50 @@ class MainWindow(QMainWindow):
             self.humanize_button, self.legato_button, self.quantize_button,
         ]
 
+        self.draw_check = QCheckBox("Draw mode (drag to create notes)")
+        self.draw_check.toggled.connect(self._on_draw_toggled)
+        col.addWidget(self.draw_check)
+        self.vel_lane_check = QCheckBox("Velocity lane")
+        self.vel_lane_check.setToolTip("A strip above the keyboard for dragging note velocities")
+        self.vel_lane_check.toggled.connect(self._on_vel_lane_toggled)
+        col.addWidget(self.vel_lane_check)
+
+        scale_row = QHBoxLayout()
+        self.scale_check = QCheckBox("Scale")
+        self.scale_check.setToolTip("Constrain pitch edits to a scale/key")
+        self.scale_check.toggled.connect(self._on_scale_changed)
+        self.scale_root_combo = QComboBox()
+        self.scale_root_combo.addItems(SCALE_ROOTS)
+        self.scale_root_combo.currentTextChanged.connect(self._on_scale_changed)
+        self.scale_type_combo = QComboBox()
+        self.scale_type_combo.addItems(list(SCALES.keys()))
+        self.scale_type_combo.currentTextChanged.connect(self._on_scale_changed)
+        scale_row.addWidget(self.scale_check)
+        scale_row.addWidget(self.scale_root_combo)
+        scale_row.addWidget(self.scale_type_combo, stretch=1)
+        col.addLayout(scale_row)
+
         col.addStretch(1)
         return panel
+
+    def _on_draw_toggled(self, on: bool) -> None:
+        self._roll.set_draw_mode(on)
+        self._settings.setValue("draw_mode", on)
+
+    def _on_vel_lane_toggled(self, on: bool) -> None:
+        self._roll.set_velocity_lane(on)
+        self._settings.setValue("vel_lane", on)
+
+    def _on_scale_changed(self, *_args) -> None:
+        enabled = self.scale_check.isChecked()
+        root = self.scale_root_combo.currentIndex()
+        scale = self.scale_type_combo.currentText()
+        self.scale_root_combo.setEnabled(enabled)
+        self.scale_type_combo.setEnabled(enabled)
+        self._roll.set_scale(enabled, root, SCALES.get(scale))
+        self._settings.setValue("scale_on", enabled)
+        self._settings.setValue("scale_root", root)
+        self._settings.setValue("scale_type", scale)
 
     def _on_grid_changed(self, label: str) -> None:
         for text, (denom, mod) in GRID_OPTIONS:
@@ -925,6 +981,13 @@ class MainWindow(QMainWindow):
             grid_label = DEFAULT_GRID_LABEL
         snap = self._settings.value("snap", True, type=bool)
         quant = max(0, min(100, int(self._settings.value("quant_strength", 100))))
+        draw_mode = self._settings.value("draw_mode", False, type=bool)
+        vel_lane = self._settings.value("vel_lane", False, type=bool)
+        scale_on = self._settings.value("scale_on", False, type=bool)
+        scale_root = max(0, min(11, int(self._settings.value("scale_root", 0))))
+        scale_type = self._settings.value("scale_type", "Major")
+        if scale_type not in SCALES:
+            scale_type = "Major"
 
         self.theme_combo.setCurrentText(theme.name)
         self.opacity_slider.setValue(opacity)
@@ -934,6 +997,13 @@ class MainWindow(QMainWindow):
         self.grid_combo.setCurrentText(grid_label)
         self.snap_check.setChecked(snap)
         self.quant_slider.setValue(quant)
+        self.draw_check.setChecked(draw_mode)
+        self.vel_lane_check.setChecked(vel_lane)
+        self.scale_check.setChecked(scale_on)
+        self.scale_root_combo.setCurrentIndex(scale_root)
+        self.scale_type_combo.setCurrentText(scale_type)
+        self.scale_root_combo.setEnabled(scale_on)
+        self.scale_type_combo.setEnabled(scale_on)
 
         self.opacity_label.setText(f"{opacity}%")
         self.lookahead_label.setText(f"{look_ahead}s")
@@ -946,6 +1016,9 @@ class MainWindow(QMainWindow):
         self._roll.set_grid(denom, mod)
         self._roll.set_snap(snap)
         self._roll.set_quantize_strength(quant / 100.0)
+        self._roll.set_draw_mode(draw_mode)
+        self._roll.set_velocity_lane(vel_lane)
+        self._roll.set_scale(scale_on, scale_root, SCALES.get(scale_type))
         self._update_inspector()  # disable selection widgets until something is picked
 
     # -- File loading -----------------------------------------------------
@@ -1286,6 +1359,14 @@ class MainWindow(QMainWindow):
         if index is None or not payload:
             return
         self._apply_track_edit(index, lambda m: edits.add_notes(m, index, list(payload)))
+
+    def _on_retarget(self, track_index: int) -> None:
+        """Clicking a note on another shown track makes that track the edit
+        target (highlight its row); the piano re-emphasizes it."""
+        for row in range(self.track_list.count()):
+            if self.track_list.item(row).data(Qt.ItemDataRole.UserRole) == track_index:
+                self.track_list.setCurrentRow(row)
+                break
 
     def _refresh_piano_view(self, *_args) -> None:
         """Show the eye-on tracks on the piano, color-coded, with the current

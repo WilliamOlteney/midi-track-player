@@ -53,6 +53,9 @@ through (the transparency is adjustable in Settings).
   add** a note. Edits snap to an **adjustable grid** (1/4…1/32, triplet, dotted)
   shown as beat/bar lines with bar numbers; hold **Alt** to bypass snap. All
   undoable, the playhead stays put, and the selection is preserved across edits
+  - **Edit any shown track** — click a note on any track that's shown on the
+    piano to make it the edit target (its row highlights); non-target tracks
+    are dimmed but stay clickable
   - **Quantize** (`Q`) snaps selected notes to the grid, with an adjustable
     strength
   - **Keyboard**: arrow keys nudge (←/→ by grid, ↑/↓ a semitone, **Shift+↑/↓**
@@ -60,6 +63,11 @@ through (the transparency is adjustable in Settings).
     the next note)
   - **Clipboard**: **Ctrl+C/X/V** copy/cut/paste (pastes at the playhead) and
     **Ctrl+D** duplicate
+  - **Draw mode** — drag on empty grid to create a note of the dragged length
+  - **Scale/key lock** — constrain pitch edits (drag, arrows, add) to a chosen
+    root + scale (Major, minor, modes, pentatonic, blues, …)
+  - **Velocity lane** — a strip above the keyboard with a draggable bar per
+    note; drag across bars to shape velocities
   - **Selection inspector** (Settings drawer): shows the selection, sets
     **velocity** numerically, a velocity **ramp** (crescendo), and **humanize**
   - A control legend sits top-right (press **H** to hide/show it)
@@ -73,8 +81,9 @@ through (the transparency is adjustable in Settings).
   Slate, Emerald, Amber — recolours the whole UI, piano included), **panel
   opacity** (how transparent the drawers are), piano **fall time** (seconds of
   upcoming notes shown), **note-name labels** on/off, the **control legend**
-  on/off, and an **Editing** section (grid, snap, quantize strength, and the
-  selection inspector). Settings are remembered between runs
+  on/off, and an **Editing** section (grid, snap, quantize strength, draw mode,
+  velocity lane, scale/key lock, and the selection inspector). Settings are
+  remembered between runs
 - **Editing** (track-level): rename, transpose, change instrument, delete a
   track, or **merge the playing (🔊) tracks into one** (their events are
   interleaved in time and each keeps its channel) — via the Edit menu or
