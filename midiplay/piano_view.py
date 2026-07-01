@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import Qt, QPointF, QRectF, QTimer, Signal
+from PySide6.QtCore import Qt, QPointF, QRectF, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -20,7 +20,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
 )
-from PySide6.QtWidgets import QVBoxLayout, QWidget
+from PySide6.QtWidgets import QWidget
 
 from midiplay.smf import Note
 
@@ -28,10 +28,9 @@ from midiplay.smf import Note
 WHITE_CLASSES = {0, 2, 4, 5, 7, 9, 11}
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
-# Look-ahead (seconds of future notes visible) bounds and frame rate.
+# Look-ahead (seconds of future notes visible) bounds.
 LOOKAHEAD_MIN = 1.0
 LOOKAHEAD_MAX = 10.0
-FRAME_MS = 16   # ~60 fps
 EDGE_PX = 6     # how close to a note's edge counts as a resize grab
 
 
@@ -659,74 +658,3 @@ class PianoRollView(QWidget):
                     rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
                     f"C{pitch // 12 - 1}",
                 )
-
-
-class PianoView(QWidget):
-    """Standalone window: a PianoRollView animated from the playback engine.
-
-    It simply polls the engine's position each frame, so it follows Play,
-    Pause, Stop, Restart, Seek, and Speed with no extra wiring."""
-
-    notes_delete_requested = Signal(object)
-    notes_edit_requested = Signal(object)
-    note_add_requested = Signal(object)
-    play_pause_requested = Signal()
-
-    def __init__(self, engine) -> None:
-        super().__init__()
-        self.setWindowTitle("Piano View")
-        self.resize(820, 480)
-        self._engine = engine
-
-        # The full window is the piano roll; zoom via the scroll wheel.
-        self._roll = PianoRollView()
-        self._roll.notesDeleteRequested.connect(self.notes_delete_requested)
-        self._roll.notesEditRequested.connect(self.notes_edit_requested)
-        self._roll.noteAddRequested.connect(self.note_add_requested)
-        self._roll.playPauseRequested.connect(self.play_pause_requested)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self._roll)
-
-        # Middle-drag in the view scrubs the song; seek the engine on release.
-        self._roll.scrubFinished.connect(self._engine.seek)
-
-        self._timer = QTimer(self)
-        self._timer.setInterval(FRAME_MS)
-        self._timer.timeout.connect(self._tick)
-
-        self.refresh_notes()
-
-    def refresh_notes(self) -> None:
-        """Single-track view: reload notes from the engine."""
-        self._roll.set_track_notes(self._engine.notes(), self._engine.duration())
-
-    def set_multi_notes(self, per_track, duration, primary_index) -> None:
-        """All-tracks view: show every track color-coded."""
-        self._roll.set_multi_notes(per_track, duration, primary_index)
-
-    def set_time_map(self, time_map) -> None:
-        self._roll.set_time_map(time_map)
-
-    # Live preview driven by the main window's seek slider.
-    def preview_begin(self) -> None:
-        self._roll.begin_scrub()
-
-    def preview_position(self, seconds: float) -> None:
-        self._roll.set_scrub_position(seconds)
-
-    def preview_end(self) -> None:
-        self._roll.end_scrub()
-
-    def _tick(self) -> None:
-        self._roll.set_position(self._engine.position())
-
-    # Animate only while visible.
-    def showEvent(self, event) -> None:
-        self._timer.start()
-        super().showEvent(event)
-
-    def hideEvent(self, event) -> None:
-        self._timer.stop()
-        super().hideEvent(event)
