@@ -4,8 +4,9 @@ The falling-notes piano fills the window and is always visible; all the
 controls (file selector, track list, output dropdown, transport, progress
 bar) live in a drawer that slides out from the left. Timers poll the engine
 to animate the piano (~60 fps) and drive the progress bar, time labels, and
-button states. Ticking a track's checkbox both plays it and shows it on the
-piano; the highlighted row is the target for edits.
+button states. Each track row has two independent toggles — an eye (show on
+the piano) and a speaker (play audio) — so any set can be shown and any set
+played; the highlighted row is the target for edits.
 """
 
 import copy
@@ -13,15 +14,30 @@ import copy
 from PySide6.QtCore import (
     Qt,
     QEasingCurve,
+    QEvent,
     QPoint,
+    QPointF,
     QPropertyAnimation,
+    QRect,
+    QRectF,
     QSettings,
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QAction, QColor, QKeySequence, QShortcut
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QKeySequence,
+    QPainter,
+    QPainterPath,
+    QPalette,
+    QPen,
+    QPolygonF,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -38,6 +54,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSlider,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
 )
@@ -48,6 +67,13 @@ from midiplay.piano_view import TRACK_COLORS, PianoRollView
 
 # Note-less tracks (e.g. a conductor/tempo track) are shown greyed out.
 EMPTY_TRACK_COLOR = QColor(0x80, 0x80, 0x80)
+
+# Per-track state stored on each list item: independent "show on the piano"
+# (eye) and "play audio" (speaker) toggles, painted by TrackToggleDelegate.
+SHOW_ROLE = Qt.ItemDataRole.UserRole + 1
+PLAY_ROLE = Qt.ItemDataRole.UserRole + 2
+# Colour used for an icon whose toggle is off (dim grey).
+ICON_OFF_COLOR = QColor(0x88, 0x88, 0x88, 130)
 
 # Discrete playback-speed choices, shown as a row of buttons (1× = recorded
 # tempo). Each is (multiplier, button label).
@@ -191,6 +217,143 @@ class SlideDrawer(QWidget):
         self._anim.start()
 
 
+class TrackToggleDelegate(QStyledItemDelegate):
+    """Draws each track row with two independent toggle icons in a left gutter:
+    an eye (show the track on the piano) and a speaker (play its audio). Bright
+    in the track's colour = on; dim grey = off. Clicking an icon flips just that
+    state and emits a signal; clicking anywhere else selects the row (the edit
+    target) as usual."""
+
+    showToggled = Signal(int)  # emits the track index whose eye was clicked
+    playToggled = Signal(int)  # emits the track index whose speaker was clicked
+
+    ICON = 16      # icon box size (px)
+    LEFT = 8       # left margin before the first icon
+    GAP = 8        # gap between the two icons (and after them)
+
+    def gutter(self) -> int:
+        return self.LEFT + self.ICON + self.GAP + self.ICON + self.GAP
+
+    def _icon_rects(self, rect):
+        y = rect.top() + (rect.height() - self.ICON) // 2
+        x = rect.left() + self.LEFT
+        eye = QRect(x, y, self.ICON, self.ICON)
+        spk = QRect(x + self.ICON + self.GAP, y, self.ICON, self.ICON)
+        return eye, spk
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        size.setHeight(max(size.height(), 24))
+        return size
+
+    def paint(self, painter, option, index) -> None:
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        widget = option.widget
+        style = widget.style() if widget else QApplication.style()
+
+        # 1) Full-row background/selection (with the text blanked out).
+        text = opt.text
+        opt.text = ""
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
+
+        # 2) The two toggle icons in the gutter.
+        fg = index.data(Qt.ItemDataRole.ForegroundRole)
+        base = QColor(0xDD, 0xDD, 0xDD)
+        if hasattr(fg, "color"):     # a QBrush (what setForeground stores)
+            base = fg.color()
+        elif isinstance(fg, QColor):
+            base = fg
+        show = bool(index.data(SHOW_ROLE))
+        play = bool(index.data(PLAY_ROLE))
+        eye_rect, spk_rect = self._icon_rects(option.rect)
+        self._draw_eye(painter, QRectF(eye_rect), base if show else ICON_OFF_COLOR, show)
+        self._draw_speaker(painter, QRectF(spk_rect), base if play else ICON_OFF_COLOR, play)
+
+        # 3) The track label, indented past the gutter.
+        painter.save()
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.setPen(opt.palette.color(QPalette.ColorRole.HighlightedText))
+        else:
+            painter.setPen(base)
+        text_rect = option.rect.adjusted(self.gutter(), 0, -6, 0)
+        painter.drawText(
+            text_rect,
+            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+            text,
+        )
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index) -> bool:
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            eye_rect, spk_rect = self._icon_rects(option.rect)
+            pos = event.position().toPoint()
+            track = index.data(Qt.ItemDataRole.UserRole)
+            if eye_rect.contains(pos):
+                model.setData(index, not bool(index.data(SHOW_ROLE)), SHOW_ROLE)
+                self.showToggled.emit(track)
+                return True   # consume so the row isn't re-selected
+            if spk_rect.contains(pos):
+                model.setData(index, not bool(index.data(PLAY_ROLE)), PLAY_ROLE)
+                self.playToggled.emit(track)
+                return True
+        return super().editorEvent(event, model, option, index)
+
+    @staticmethod
+    def _draw_eye(painter, rect, color, on) -> None:
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cx, cy = rect.center().x(), rect.center().y()
+        w, h = rect.width(), rect.height()
+        painter.setPen(QPen(color, 1.4))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        path = QPainterPath()  # an almond eye outline
+        path.moveTo(cx - w * 0.42, cy)
+        path.quadTo(cx, cy - h * 0.36, cx + w * 0.42, cy)
+        path.quadTo(cx, cy + h * 0.36, cx - w * 0.42, cy)
+        painter.drawPath(path)
+        painter.setBrush(color)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(QPointF(cx, cy), h * 0.13, h * 0.13)
+        if not on:  # a slash for "hidden"
+            painter.setPen(QPen(color, 1.4))
+            painter.drawLine(
+                QPointF(cx - w * 0.40, cy + h * 0.34),
+                QPointF(cx + w * 0.40, cy - h * 0.34),
+            )
+        painter.restore()
+
+    @staticmethod
+    def _draw_speaker(painter, rect, color, on) -> None:
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cx, cy = rect.center().x(), rect.center().y()
+        w, h = rect.width(), rect.height()
+        painter.setPen(QPen(color, 1.2))
+        painter.setBrush(color)
+        box_w, box_h = w * 0.20, h * 0.30
+        left = rect.left() + w * 0.14
+        cone = QPolygonF([
+            QPointF(left, cy - box_h / 2),
+            QPointF(left, cy + box_h / 2),
+            QPointF(left + box_w, cy + box_h / 2),
+            QPointF(left + box_w + w * 0.20, cy + h * 0.30),
+            QPointF(left + box_w + w * 0.20, cy - h * 0.30),
+            QPointF(left + box_w, cy - box_h / 2),
+        ])
+        painter.drawPolygon(cone)
+        if on:  # two sound-wave arcs
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(color, 1.3))
+            for radius in (w * 0.16, w * 0.28):
+                arc = QRectF(cx + w * 0.02 - radius, cy - radius, radius * 2, radius * 2)
+                painter.drawArc(arc, -50 * 16, 100 * 16)
+        painter.restore()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -218,7 +381,8 @@ class MainWindow(QMainWindow):
         self._dirty = False
         self._save_path = None        # set once the user has chosen a Save target
         self._pending_select_row = None    # row to select after a structural edit
-        self._pending_check_indices = None  # tracks to re-check after a structural edit
+        self._pending_show_indices = None  # tracks to re-show after a structural edit
+        self._pending_play_indices = None  # tracks to re-play after a structural edit
 
         self._build_menus()
 
@@ -290,16 +454,19 @@ class MainWindow(QMainWindow):
     def _build_middle(self) -> QVBoxLayout:
         col = QVBoxLayout()
 
-        col.addWidget(QLabel("Tracks — tick to play &amp; show on the piano"))
+        col.addWidget(QLabel("Tracks — 👁 show on piano · 🔊 play audio"))
         self.track_list = QListWidget()
         self.track_list.setEnabled(False)  # enabled once a file is loaded
-        # Tick a track's checkbox to play it and show it on the piano; the
-        # highlighted (current) row is the target for edits.
+        # Each row has an eye (show) and speaker (play) toggle drawn by the
+        # delegate; the highlighted (current) row is the target for edits.
         self.track_list.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection
         )
+        self._track_delegate = TrackToggleDelegate(self.track_list)
+        self.track_list.setItemDelegate(self._track_delegate)
+        self._track_delegate.showToggled.connect(self._on_show_toggled)
+        self._track_delegate.playToggled.connect(self._on_play_toggled)
         self.track_list.currentRowChanged.connect(self._on_edit_target_changed)
-        self.track_list.itemChanged.connect(self._on_track_check_changed)
         self.track_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.track_list.customContextMenuRequested.connect(self._track_context_menu)
         col.addWidget(self.track_list, stretch=1)
@@ -428,32 +595,30 @@ class MainWindow(QMainWindow):
         self.file_path_edit.setText(path)
         self.statusBar().showMessage(f"Loaded: {info.summary()}")
         self._populate_tracks()
-        self._sync_active_tracks(preserve_playhead=False)  # load ticked track(s)
+        self._sync_all(preserve_playhead=False)  # load the played/shown track(s)
         self._update_title()
         self._update_edit_actions()
 
-    def _populate_tracks(self, select_row: int | None = None, check_indices=None) -> None:
-        """Fill the track list from the loaded file. Each item has a checkbox
-        (ticked tracks play and show on the piano) — `check_indices` sets which
-        are ticked, defaulting to the first track with notes. Selects
-        `select_row` (clamped) if given, else the first track with notes."""
+    def _populate_tracks(
+        self, select_row: int | None = None, show_indices=None, play_indices=None
+    ) -> None:
+        """Fill the track list from the loaded file. Each row carries two
+        independent states — shown on the piano (eye) and played (speaker).
+        `show_indices` / `play_indices` set which start on, each defaulting to
+        the first track with notes. Selects `select_row` (clamped) if given,
+        else the first track with notes."""
         self.track_infos = smf.track_infos(self.midi_file)
-        if check_indices is None:
-            checked = {smf.first_track_with_notes(self.midi_file)}
-        else:
-            checked = set(check_indices)
+        default = {smf.first_track_with_notes(self.midi_file)}
+        show = default if show_indices is None else set(show_indices)
+        play = default if play_indices is None else set(play_indices)
 
-        # Block itemChanged while (re)building so setCheckState doesn't fire it.
         self.track_list.blockSignals(True)
         self.track_list.clear()
         for info in self.track_infos:
             item = QListWidgetItem(info.label())
             item.setData(Qt.ItemDataRole.UserRole, info.index)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(
-                Qt.CheckState.Checked if info.index in checked
-                else Qt.CheckState.Unchecked
-            )
+            item.setData(SHOW_ROLE, info.index in show)
+            item.setData(PLAY_ROLE, info.index in play)
             # Color the title to match the piano; grey out note-less tracks.
             if info.has_notes:
                 item.setForeground(TRACK_COLORS[info.index % len(TRACK_COLORS)])
@@ -476,15 +641,21 @@ class MainWindow(QMainWindow):
             return None
         return item.data(Qt.ItemDataRole.UserRole)
 
-    def checked_track_indices(self) -> list[int]:
-        """0-based indices of every ticked track, in file order. These are the
-        tracks that play simultaneously and are shown on the piano."""
+    def _tracks_with_role(self, role) -> list[int]:
         indices = []
         for row in range(self.track_list.count()):
             item = self.track_list.item(row)
-            if item.checkState() == Qt.CheckState.Checked:
+            if bool(item.data(role)):
                 indices.append(item.data(Qt.ItemDataRole.UserRole))
         return sorted(indices)
+
+    def show_track_indices(self) -> list[int]:
+        """0-based indices of the tracks shown on the piano (eye on)."""
+        return self._tracks_with_role(SHOW_ROLE)
+
+    def play_track_indices(self) -> list[int]:
+        """0-based indices of the tracks that play (speaker on)."""
+        return self._tracks_with_role(PLAY_ROLE)
 
     # -- MIDI output devices ----------------------------------------------
     def _refresh_devices(self) -> None:
@@ -554,36 +725,45 @@ class MainWindow(QMainWindow):
 
     def _on_edit_target_changed(self, *_args) -> None:
         """User highlighted a different row: it becomes the edit target, so
-        re-emphasize it on the piano. Playback set (the ticked tracks) is
-        unaffected."""
+        re-emphasize it on the piano. Show/play sets are unaffected."""
         self._refresh_piano_view()
         self._update_edit_actions()
 
-    def _on_track_check_changed(self, _item=None) -> None:
-        """User ticked/unticked a track: it now (or no longer) plays and shows
-        on the piano. Reload the engine with the ticked set, keeping the
-        playhead so toggling doesn't restart the song."""
-        self._sync_active_tracks(preserve_playhead=True)
+    def _on_show_toggled(self, _track: int) -> None:
+        """User toggled a track's eye: update what the piano draws (playback is
+        unaffected)."""
+        self._refresh_piano_view()
         self._update_edit_actions()
 
-    def _sync_active_tracks(self, preserve_playhead: bool) -> None:
-        """Load the ticked tracks into the engine (what plays) and refresh the
-        piano to match. When `preserve_playhead`, keep the current position and
-        play state across the reload; otherwise start fresh from 0."""
-        checked = self.checked_track_indices()
-        if not (self.midi_file is not None and checked):
+    def _on_play_toggled(self, _track: int) -> None:
+        """User toggled a track's speaker: reload the engine with the played
+        set, keeping the playhead so toggling doesn't restart the song. Refresh
+        the piano too since its time span follows the played duration."""
+        self._sync_playback(preserve_playhead=True)
+        self._refresh_piano_view()
+        self._update_edit_actions()
+
+    def _sync_playback(self, preserve_playhead: bool) -> None:
+        """Load the played (speaker-on) tracks into the engine. When
+        `preserve_playhead`, keep the current position and play state across the
+        reload; otherwise start fresh from 0."""
+        play = self.play_track_indices()
+        if not (self.midi_file is not None and play):
             self.engine.stop()
             self._prepared_key = None
-            self._refresh_piano_view()
             return
         position = self.engine.position()
         was_playing = self.engine.state() == PlayerState.PLAYING
-        self.engine.set_tracks(self.midi_file, checked)  # stops + resets to 0
-        self._prepared_key = (id(self.midi_file), tuple(checked))
+        self.engine.set_tracks(self.midi_file, play)  # stops + resets to 0
+        self._prepared_key = (id(self.midi_file), tuple(play))
         if preserve_playhead:
             self.engine.seek(min(position, self.engine.duration()))
             if was_playing:
                 self.engine.play()
+
+    def _sync_all(self, preserve_playhead: bool) -> None:
+        """Reload both the engine (played tracks) and the piano (shown tracks)."""
+        self._sync_playback(preserve_playhead)
         self._refresh_piano_view()
 
     def _ensure_port(self) -> bool:
@@ -622,9 +802,9 @@ class MainWindow(QMainWindow):
         if self.midi_file is None:
             self.statusBar().showMessage("Open a MIDI file first")
             return False
-        tracks = self.checked_track_indices()
+        tracks = self.play_track_indices()
         if not tracks:
-            self.statusBar().showMessage("Tick a track to play")
+            self.statusBar().showMessage("Enable a track's audio (🔊) to play")
             return False
         if not self._ensure_port():
             return False
@@ -716,19 +896,26 @@ class MainWindow(QMainWindow):
         self._apply_track_edit(index, lambda m: edits.add_note(m, index, pitch, start_tick))
 
     def _refresh_piano_view(self, *_args) -> None:
-        """Show the ticked tracks on the piano, color-coded, with the current
+        """Show the eye-on tracks on the piano, color-coded, with the current
         edit-target row emphasized (and editable) and the rest dimmed. Called
-        when the ticked set, the highlighted row, or the file changes."""
+        when the shown set, the played set, the highlighted row, or the file
+        changes."""
         if self.midi_file is None:
             self._roll.set_multi_notes([], 0.0, None)
             return
         self._roll.set_time_map(smf.TimeMap(self.midi_file))
-        checked = self.checked_track_indices()
+        shown = self.show_track_indices()
         # The edit target is emphasized only when it is itself shown; otherwise
         # nothing is editable, matching what's visible.
         primary = self.selected_track_index()
-        per_track = smf.extract_notes_for(self.midi_file, checked)
-        self._roll.set_multi_notes(per_track, self.engine.duration(), primary)
+        per_track = smf.extract_notes_for(self.midi_file, shown)
+        # Span at least the played duration, but also any shown notes that
+        # extend past it (a track can be shown without being played).
+        duration = self.engine.duration()
+        for _index, notes in per_track:
+            if notes:
+                duration = max(duration, max(n.end for n in notes))
+        self._roll.set_multi_notes(per_track, duration, primary)
 
     # -- Drag and drop ----------------------------------------------------
     def dragEnterEvent(self, event) -> None:
@@ -771,7 +958,7 @@ class MainWindow(QMainWindow):
 
         ready = (
             self.midi_file is not None
-            and bool(self.checked_track_indices())
+            and bool(self.play_track_indices())
             and self.selected_device_name() is not None
         )
         playing = state == PlayerState.PLAYING
@@ -807,8 +994,10 @@ class MainWindow(QMainWindow):
         self.act_transpose = edit_menu.addAction("Transpose Track…", self._edit_transpose)
         self.act_instrument = edit_menu.addAction("Change Instrument…", self._edit_instrument)
         edit_menu.addSeparator()
-        self.act_merge = edit_menu.addAction("Merge Tracks", self._edit_merge)
-        self.act_merge.setToolTip("Combine the selected tracks into one (select two or more)")
+        self.act_merge = edit_menu.addAction("Merge Playing Tracks", self._edit_merge)
+        self.act_merge.setToolTip(
+            "Combine the tracks with audio enabled (🔊) into one (needs two or more)"
+        )
         self.act_delete = edit_menu.addAction("Delete Track", self._edit_delete)
 
     def _track_context_menu(self, pos) -> None:
@@ -821,7 +1010,7 @@ class MainWindow(QMainWindow):
         menu.addAction("Transpose…", self._edit_transpose)
         menu.addAction("Change Instrument…", self._edit_instrument)
         menu.addSeparator()
-        merge = menu.addAction("Merge Ticked Tracks", self._edit_merge)
+        merge = menu.addAction("Merge Playing Tracks", self._edit_merge)
         merge.setEnabled(self.act_merge.isEnabled())
         delete = menu.addAction("Delete Track", self._edit_delete)
         delete.setEnabled(self.act_delete.isEnabled())
@@ -869,24 +1058,47 @@ class MainWindow(QMainWindow):
             QMessageBox.question(self, "Delete Track", f"Delete '{name}'?")
             == QMessageBox.StandardButton.Yes
         ):
-            # Keep the surviving ticked tracks ticked (indices above the
-            # deleted one shift down by one).
-            checked = set(self.checked_track_indices())
-            remapped = {(i - 1 if i > index else i) for i in checked if i != index}
-            self._pending_check_indices = remapped or None
+            # Keep the surviving show/play states (indices above the deleted one
+            # shift down by one).
+            remap = lambda s: {(i - 1 if i > index else i) for i in s if i != index}
+            self._pending_show_indices = remap(set(self.show_track_indices())) or None
+            self._pending_play_indices = remap(set(self.play_track_indices())) or None
             self._apply_file_edit(lambda m: edits.delete_track(m, index))
 
     def _edit_merge(self) -> None:
-        indices = self.checked_track_indices()  # merge the ticked tracks
+        indices = self.play_track_indices()  # merge the tracks with audio on
         if self.midi_file is None or len(indices) < 2:
             return
-        # The merged track lands at the earliest ticked position; select it and
-        # keep it ticked so playback/piano continue on the combined track.
+        # The merged track lands at the earliest position; select it, play it,
+        # and show it if any of the merged tracks were shown.
         target = min(indices)
         self._pending_select_row = target
-        self._pending_check_indices = {target}
+        self._pending_play_indices = {target}
+        self._pending_show_indices = self._remap_after_merge(
+            set(self.show_track_indices()), indices, target
+        )
         self._apply_file_edit(lambda m: edits.merge_tracks(m, indices))
         self.statusBar().showMessage(f"Merged {len(indices)} tracks into one")
+
+    @staticmethod
+    def _remap_after_merge(state: set, merged, target: int) -> set:
+        """Remap a set of track indices across a merge of `merged` into a single
+        track at `target` (= min(merged)). Surviving indices shift down past the
+        removed tracks; `target` is included if any merged track was in the
+        set."""
+        merged_set = set(merged)
+        out = set()
+        collapsed = False
+        for i in state:
+            if i in merged_set:
+                collapsed = True
+            elif i < target:
+                out.add(i)
+            else:
+                out.add(i - sum(1 for m in merged if m < i) + 1)
+        if collapsed:
+            out.add(target)
+        return out
 
     def _apply_track_edit(self, index: int, mutator) -> None:
         """Edit affecting only one track: snapshot just that track (fast) then
@@ -976,17 +1188,22 @@ class MainWindow(QMainWindow):
             self.track_list.blockSignals(False)
         else:
             # Structural change (add/delete/merge): rebuild, restoring the
-            # ticked set and selection the edit handler asked for.
+            # show/play states and selection the edit handler asked for.
             row = self._pending_select_row
             if row is None:
                 row = self.track_list.currentRow()
             row = max(0, min(row, len(self.track_infos) - 1))
-            self._populate_tracks(select_row=row, check_indices=self._pending_check_indices)
+            self._populate_tracks(
+                select_row=row,
+                show_indices=self._pending_show_indices,
+                play_indices=self._pending_play_indices,
+            )
         self._pending_select_row = None
-        self._pending_check_indices = None
+        self._pending_show_indices = None
+        self._pending_play_indices = None
 
         self._prepared_key = None
-        self._sync_active_tracks(preserve_playhead=False)  # _commit_change restores it
+        self._sync_all(preserve_playhead=False)  # _commit_change restores it
         self._update_title()
         self._update_edit_actions()
 
@@ -1043,7 +1260,7 @@ class MainWindow(QMainWindow):
         self.act_delete.setEnabled(
             has_track and has_file and len(self.midi_file.tracks) > 1
         )
-        self.act_merge.setEnabled(has_file and len(self.checked_track_indices()) >= 2)
+        self.act_merge.setEnabled(has_file and len(self.play_track_indices()) >= 2)
         self.act_save.setEnabled(has_file)
         self.act_save_as.setEnabled(has_file)
         self.act_undo.setEnabled(bool(self._undo_stack))
