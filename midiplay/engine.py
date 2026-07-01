@@ -43,6 +43,9 @@ class PlaybackEngine:
         self._loop = False
         self._muted = False
         self._out_channel = None  # remap output to this channel (0-15), or None
+        # Free-run: keep the clock advancing past the end of the timeline (used
+        # while recording, so you can record beyond the existing song length).
+        self._free_run = False
 
         # Timing anchors: position == _anchor_pos + (now - _anchor_wall) * speed
         # while PLAYING; frozen at _anchor_pos otherwise.
@@ -115,11 +118,19 @@ class PlaybackEngine:
             if playing:
                 self._spawn_worker_locked()
 
+    def set_free_run(self, on: bool) -> None:
+        """Keep playing (the clock advancing) past the end of the timeline,
+        instead of stopping — used while recording."""
+        with self._lock:
+            self._free_run = bool(on)
+
     # -- Transport --------------------------------------------------------
     def play(self) -> None:
         with self._lock:
-            if self._state == PlayerState.PLAYING or not self._timeline.events:
+            if self._state == PlayerState.PLAYING:
                 return
+            if not self._timeline.events and not self._free_run:
+                return  # nothing to play (but free-run runs the clock anyway)
             self._spawn_worker_locked()  # resumes from _anchor_pos / _next_index
 
     def pause(self) -> None:
@@ -155,7 +166,8 @@ class PlaybackEngine:
         with self._lock:
             duration = self._timeline.duration
             playing = self._state == PlayerState.PLAYING
-        seconds = max(0.0, min(seconds, duration))
+            free = self._free_run
+        seconds = max(0.0, seconds if free else min(seconds, duration))
 
         if playing:
             self._stop_flag.set()
@@ -195,7 +207,9 @@ class PlaybackEngine:
     def _position_locked(self) -> float:
         if self._state == PlayerState.PLAYING:
             elapsed = (time.perf_counter() - self._anchor_wall) * self._speed
-            return min(self._anchor_pos + elapsed, self._timeline.duration)
+            pos = self._anchor_pos + elapsed
+            # Free-run lets the clock run past the timeline end (for recording).
+            return pos if self._free_run else min(pos, self._timeline.duration)
         return self._anchor_pos
 
     def _spawn_worker_locked(self) -> None:
@@ -225,8 +239,15 @@ class PlaybackEngine:
                     ) / self._speed
                     port = self._port
                 at_end = index >= len(events)
+                free = self._free_run
 
             if at_end:
+                if free and not self._loop:
+                    # Keep the clock advancing past the end (recording); wait
+                    # for stop rather than spinning.
+                    if self._stop_flag.wait(0.05):
+                        return
+                    continue
                 if self._handle_end():
                     continue
                 return
