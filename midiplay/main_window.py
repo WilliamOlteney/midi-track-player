@@ -61,7 +61,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from midiplay import devices, edits, smf
+from midiplay import devices, edits, smf, theme as themes
 from midiplay.engine import PlaybackEngine, PlayerState
 from midiplay.piano_view import TRACK_COLORS, PianoRollView
 
@@ -456,6 +456,12 @@ class MainWindow(QMainWindow):
         self._settings = QSettings()  # remembers the last output device
         self.setAcceptDrops(True)     # drag a .mid onto the window
         self._seeking = False         # True while the user drags the seek bar
+        self._theme = themes.DEFAULT_THEME  # current colour scheme
+
+        # A consistent style across platforms so theme palettes apply cleanly.
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyle("Fusion")
 
         # Editing state: snapshot-based undo/redo + unsaved-changes tracking.
         self._undo_stack: list = []
@@ -670,6 +676,14 @@ class MainWindow(QMainWindow):
 
         col.addWidget(_hline())
         col.addWidget(QLabel("Appearance"))
+        scheme_row = QHBoxLayout()
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(list(themes.THEMES.keys()))
+        self.theme_combo.setToolTip("The overall UI colour scheme")
+        self.theme_combo.currentTextChanged.connect(self._on_theme_changed)
+        scheme_row.addWidget(QLabel("Color scheme"))
+        scheme_row.addWidget(self.theme_combo, stretch=1)
+        col.addLayout(scheme_row)
         opacity_row = QHBoxLayout()
         self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self.opacity_slider.setRange(40, 100)   # percent
@@ -705,13 +719,33 @@ class MainWindow(QMainWindow):
         return panel
 
     def _panel_style(self, alpha: int, side: str) -> str:
-        """Stylesheet for a drawer panel: a translucent light background so the
-        piano shows faintly through, with a subtle divider on the inner edge."""
+        """Stylesheet for a drawer panel: a translucent background (in the
+        current theme's panel colour) so the piano shows through, with a subtle
+        divider on the inner edge."""
         border = "border-right" if side == "left" else "border-left"
+        p = self._theme.panel
+        b = self._theme.panel_border
         return (
-            f"#drawerPanel {{ background: rgba(246, 247, 249, {alpha}); "
-            f"{border}: 1px solid rgba(120, 120, 130, 90); }}"
+            f"#drawerPanel {{ background: rgba({p.red()}, {p.green()}, {p.blue()}, {alpha}); "
+            f"{border}: 1px solid rgba({b.red()}, {b.green()}, {b.blue()}, {b.alpha()}); }}"
         )
+
+    def _on_theme_changed(self, name: str) -> None:
+        theme = themes.THEMES.get(name)
+        if theme is None:
+            return
+        self._apply_theme(theme)
+        self._settings.setValue("theme", name)
+
+    def _apply_theme(self, theme) -> None:
+        """Recolour the whole UI: widget palette, the piano, and the drawer
+        panels (keeping the current opacity)."""
+        self._theme = theme
+        app = QApplication.instance()
+        if app is not None:
+            app.setPalette(themes.build_palette(theme))
+        self._roll.set_theme(theme)
+        self._apply_panel_opacity(self.opacity_slider.value())
 
     def _apply_panel_opacity(self, percent: int) -> None:
         alpha = max(0, min(255, round(percent / 100 * 255)))
@@ -760,7 +794,10 @@ class MainWindow(QMainWindow):
         look_ahead = max(1, min(10, int(self._settings.value("look_ahead", 3))))
         labels = self._settings.value("note_labels", True, type=bool)
         legend = self._settings.value("legend", True, type=bool)
+        theme_name = self._settings.value("theme", themes.DEFAULT_THEME_NAME)
+        theme = themes.THEMES.get(theme_name, themes.DEFAULT_THEME)
 
+        self.theme_combo.setCurrentText(theme.name)
         self.opacity_slider.setValue(opacity)
         self.lookahead_slider.setValue(look_ahead)
         self.labels_check.setChecked(labels)
@@ -768,7 +805,7 @@ class MainWindow(QMainWindow):
 
         self.opacity_label.setText(f"{opacity}%")
         self.lookahead_label.setText(f"{look_ahead}s")
-        self._apply_panel_opacity(opacity)
+        self._apply_theme(theme)  # palette + piano + panels (uses opacity above)
         self._roll.set_look_ahead(float(look_ahead))
         self._roll.set_labels_visible(labels)
         self._roll.set_legend_visible(legend)

@@ -23,6 +23,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget
 
 from midiplay.smf import Note
+from midiplay.theme import DEFAULT_THEME
 
 # MIDI note classes that are white keys (C D E F G A B).
 WHITE_CLASSES = {0, 2, 4, 5, 7, 9, 11}
@@ -38,21 +39,8 @@ def note_name(pitch: int) -> str:
     """MIDI pitch -> name with octave, e.g. 60 -> 'C4'."""
     return f"{NOTE_NAMES[pitch % 12]}{pitch // 12 - 1}"
 
-# Colors
-BG_COLOR = QColor(0x1E, 0x1E, 0x24)
-HIT_LINE_COLOR = QColor(0xFF, 0xFF, 0xFF, 0xB0)
-HIT_GLOW = QColor(0x7E, 0xB0, 0xFF)
-GUIDE_LINE = QColor(0xFF, 0xFF, 0xFF, 0x12)
-NOTE_WHITE = QColor(0x4C, 0x8B, 0xF5)   # note that lands on a white key
-NOTE_BLACK = QColor(0x2E, 0x5C, 0xC8)   # note that lands on a black key
-NOTE_ACTIVE = QColor(0xA8, 0xCB, 0xFF)  # note currently crossing the hit line
-NOTE_BORDER = QColor(0x10, 0x20, 0x40)
-NOTE_TEXT = QColor(0x0C, 0x18, 0x2E)    # label drawn on a falling note
-SELECTION_COLOR = QColor(0xFF, 0xFF, 0xFF)  # outline on selected notes
-LEGEND_BG = QColor(0x12, 0x12, 0x18, 0xCC)
-LEGEND_BORDER = QColor(0xFF, 0xFF, 0xFF, 0x33)
-LEGEND_KEY = QColor(0x9F, 0xC4, 0xFF)
-LEGEND_TEXT = QColor(0xCC, 0xCC, 0xCC)
+# Per-scheme colours (background, keyboard, notes, legend, …) live in
+# midiplay.theme.Theme; the view reads them from self._theme.
 
 # Control reference shown in the top-right legend: (gesture, action).
 LEGEND = (
@@ -69,11 +57,6 @@ LEGEND = (
     ("Middle-drag", "zoom"),
     ("H", "hide / show this"),
 )
-WHITE_KEY = QColor(0xF4, 0xF4, 0xF4)
-BLACK_KEY = QColor(0x20, 0x20, 0x20)
-ACTIVE_KEY = QColor(0x6F, 0xA8, 0xFF)   # key whose note is sounding
-KEY_BORDER = QColor(0x55, 0x55, 0x55)
-LABEL_COLOR = QColor(0x70, 0x70, 0x70)
 
 # Distinct colors for the all-tracks view (cycled if there are more tracks).
 TRACK_COLORS = (
@@ -145,6 +128,7 @@ class PianoRollView(QWidget):
         self._legend_font.setPointSize(8)
         self._show_legend = True   # toggled with 'H' or the settings drawer
         self._labels_visible = True  # note-name labels on the falling notes
+        self._theme = DEFAULT_THEME  # colour scheme (set via set_theme)
 
         # Scrubbing: while active, the engine's position is ignored and the
         # view follows the scrub position instead.
@@ -186,6 +170,10 @@ class PianoRollView(QWidget):
         self._show_legend = bool(visible)
         self.update()
 
+    def set_theme(self, theme) -> None:
+        self._theme = theme
+        self.update()
+
     def wheelEvent(self, event) -> None:
         # Scroll wheel scrubs the song position (seek on each notch).
         step = self._look_ahead * 0.12
@@ -202,7 +190,11 @@ class PianoRollView(QWidget):
     def set_track_notes(self, notes: list[Note], duration: float) -> None:
         """Single-track view: notes colored by white/black key."""
         self._vnotes = [
-            _VNote(n, NOTE_WHITE if _is_white(n.pitch) else NOTE_BLACK, dim=False)
+            _VNote(
+                n,
+                self._theme.note_white if _is_white(n.pitch) else self._theme.note_black,
+                dim=False,
+            )
             for n in notes
         ]
         self._duration = duration
@@ -502,7 +494,7 @@ class PianoRollView(QWidget):
         kb_height = self._keyboard_height()
         notes_bottom = height - kb_height  # the hit line / top of the keyboard
 
-        painter.fillRect(0, 0, width, height, BG_COLOR)
+        painter.fillRect(0, 0, width, height, self._theme.bg)
 
         active = {
             v.note.pitch
@@ -529,22 +521,22 @@ class PianoRollView(QWidget):
         x = width - panel_w - 10
         y = 10.0
 
-        painter.setPen(QPen(LEGEND_BORDER, 1))
-        painter.setBrush(LEGEND_BG)
+        painter.setPen(QPen(self._theme.legend_border, 1))
+        painter.setBrush(self._theme.legend_bg)
         painter.drawRoundedRect(QRectF(x, y, panel_w, panel_h), 6, 6)
 
         painter.setFont(self._legend_font)
         text_y = y + pad + metrics.ascent()
         for key, desc in LEGEND:
-            painter.setPen(QPen(LEGEND_KEY))
+            painter.setPen(QPen(self._theme.legend_key))
             painter.drawText(QPointF(x + pad, text_y), key)
-            painter.setPen(QPen(LEGEND_TEXT))
+            painter.setPen(QPen(self._theme.legend_text))
             painter.drawText(QPointF(x + pad + key_w + gap, text_y), desc)
             text_y += line_h
 
     def _draw_guides(self, painter, geo, notes_bottom) -> None:
         """Faint vertical line at each C, for pitch reference."""
-        painter.setPen(QPen(GUIDE_LINE, 1))
+        painter.setPen(QPen(self._theme.guide, 1))
         for pitch, (x, _w, _is_black) in geo.items():
             if pitch % 12 == 0:  # C
                 painter.drawLine(int(x), 0, int(x), int(notes_bottom))
@@ -589,11 +581,11 @@ class PianoRollView(QWidget):
             if rect is None:
                 continue
             is_active = start <= self._position < end
-            painter.setPen(QPen(NOTE_BORDER, 1))
+            painter.setPen(QPen(self._theme.note_border, 1))
             painter.setBrush(self._note_color(vnote, is_active, velocity))
             painter.drawRoundedRect(rect, 3, 3)
             if note.id in self._selected:
-                painter.setPen(QPen(SELECTION_COLOR, 2))
+                painter.setPen(QPen(self._theme.selection, 2))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRoundedRect(rect, 3, 3)
             # Note name (or the live velocity while Shift-dragging).
@@ -604,16 +596,16 @@ class PianoRollView(QWidget):
                     self._draw_note_label(painter, rect, note_name(pitch))
 
     def _draw_note_label(self, painter, rect, text) -> None:
-        """Bold note name with a white outline, centered in the note."""
+        """Bold note name with a contrasting outline, centered in the note."""
         metrics = QFontMetricsF(self._label_font)
         x = rect.center().x() - metrics.horizontalAdvance(text) / 2
         baseline = rect.center().y() - metrics.height() / 2 + metrics.ascent()
         path = QPainterPath()
         path.addText(QPointF(x, baseline), self._label_font, text)
-        painter.setPen(QPen(SELECTION_COLOR, 2.0))  # white outline
+        painter.setPen(QPen(self._theme.selection, 2.0))  # outline
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(path)
-        painter.fillPath(path, NOTE_TEXT)            # dark fill on top
+        painter.fillPath(path, self._theme.note_text)     # fill on top
 
     def _hit_test(self, pos):
         """The editable (non-dim) vnote under a point, or None."""
@@ -642,32 +634,33 @@ class PianoRollView(QWidget):
     def _draw_hit_line(self, painter, width, notes_bottom) -> None:
         # Soft glow fading up into the falling area, then the line itself.
         glow = QLinearGradient(0, notes_bottom - 18, 0, notes_bottom)
-        top_color = QColor(HIT_GLOW)
+        top_color = QColor(self._theme.hit_glow)
         top_color.setAlpha(0)
-        bottom_color = QColor(HIT_GLOW)
+        bottom_color = QColor(self._theme.hit_glow)
         bottom_color.setAlpha(70)
         glow.setColorAt(0.0, top_color)
         glow.setColorAt(1.0, bottom_color)
         painter.fillRect(QRectF(0, notes_bottom - 18, width, 18), glow)
 
-        painter.setPen(QPen(HIT_LINE_COLOR, 2))
+        painter.setPen(QPen(self._theme.hit_line, 2))
         painter.drawLine(0, int(notes_bottom), width, int(notes_bottom))
 
     def _draw_keyboard(self, painter, geo, notes_bottom, kb_height, active) -> None:
         # White keys first (full height), then black keys on top (shorter).
-        painter.setPen(QPen(KEY_BORDER, 1))
+        theme = self._theme
+        painter.setPen(QPen(theme.key_border, 1))
         for pitch, (x, w, is_black) in geo.items():
             if not is_black:
-                painter.setBrush(ACTIVE_KEY if pitch in active else WHITE_KEY)
+                painter.setBrush(theme.key_active if pitch in active else theme.key_white)
                 painter.drawRect(QRectF(x, notes_bottom, w, kb_height))
         self._draw_c_labels(painter, geo, notes_bottom, kb_height)
         for pitch, (x, w, is_black) in geo.items():
             if is_black:
-                painter.setBrush(ACTIVE_KEY if pitch in active else BLACK_KEY)
+                painter.setBrush(theme.key_active if pitch in active else theme.key_black)
                 painter.drawRect(QRectF(x, notes_bottom, w, kb_height * 0.62))
 
     def _draw_c_labels(self, painter, geo, notes_bottom, kb_height) -> None:
-        painter.setPen(QPen(LABEL_COLOR))
+        painter.setPen(QPen(self._theme.key_label))
         for pitch, (x, w, is_black) in geo.items():
             if pitch % 12 == 0:  # C — label with its octave (MIDI: 60 = C4)
                 rect = QRectF(x, notes_bottom + kb_height - 16, w, 14)
