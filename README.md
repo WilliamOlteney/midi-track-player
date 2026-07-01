@@ -1,19 +1,28 @@
 # MIDI Track Player
 
 A minimal, reliable desktop app that loads a Standard MIDI File (`.mid`) and
-plays **one or more selected tracks** to an external MIDI output device (e.g. a
+plays **one or more tracks** to an external MIDI output device (e.g. a
 MIDI keyboard).
 
 Built with **PySide6** (UI), **mido** (MIDI file parsing), and
 **python-rtmidi** (MIDI I/O — CoreMIDI on macOS).
 
+## Layout
+
+Everything lives in **one window**. A Synthesia-style **falling-notes piano**
+is always visible and fills the window; all the controls (file, tracks,
+devices, transport) live in a **drawer that slides out from the left** — click
+the handle on its edge to show or hide it.
+
 ## Features
 
 - Open a `.mid` file (file dialog or **drag-and-drop** onto the window)
-- Track list showing **track number · name · event count**
-- Select **one or more tracks** to play together (Ctrl/Shift-click for a
-  multi-selection); they're merged onto a shared time axis and play in sync.
-  Editing applies to the **focused (current) track** only
+- Track list showing **track number · name · event count**, each with a
+  **checkbox**: tick one or more tracks to **play them together and show them on
+  the piano** (they're merged onto a shared time axis and play in sync). By
+  default the first track with notes is ticked. Toggling a checkbox during
+  playback keeps the playhead where it is. The **highlighted (current) row** is
+  the target for edits
 - Choose any connected **MIDI output** (with **Refresh** for hot-plugging)
 - **Output channel** selector — keep each track's recorded channel, or force the
   played track onto one channel. Set this to your keyboard's receive channel if
@@ -21,13 +30,14 @@ Built with **PySide6** (UI), **mido** (MIDI file parsing), and
 - Transport: **Play / Pause / Stop / Restart** (Spacebar toggles play/pause)
 - **Click-to-seek** progress bar (click or drag to jump; instrument state is
   reapplied so it sounds correct from the new position) with elapsed / total time
-- **Piano View** — a Synthesia-style falling-notes window: notes fall onto a
-  piano keyboard in sync with playback, keys light up as they sound, notes are
-  labelled with their (bold, outlined) names. **Scroll wheel** scrubs the song;
-  **middle-drag** zooms the time window; the main seek bar updates it live. An
-  **All tracks** toggle shows every track color-coded (played track emphasized).
-  Follows Play/Pause/Seek/Speed automatically and runs at ~60 fps
-- **Note editing in the Piano View** — left-click to select (Ctrl-click for
+- **Piano** — the always-visible falling-notes view: notes fall onto a piano
+  keyboard in sync with playback, keys light up as they sound, notes are
+  labelled with their (bold, outlined) names. The ticked tracks are shown
+  color-coded with the current edit-target track emphasized. **Scroll wheel**
+  scrubs the song; **middle-drag** zooms the time window; the main seek bar
+  updates it live. Follows Play/Pause/Seek/Speed automatically and runs at
+  ~60 fps
+- **Note editing in the piano** — left-click to select (Ctrl-click for
   multiple), **Delete** to remove, **drag** to move (pitch + time), drag a note's
   edge to resize, **Shift-drag** to change velocity (brightness shows it live),
   and **double-click empty grid to add** a note. Time edits snap to a 1/16 grid
@@ -41,9 +51,9 @@ Built with **PySide6** (UI), **mido** (MIDI file parsing), and
 - **Speed** buttons (0.25× / 0.5× / 0.75× / 1× / 1.5× / 2×), **Loop**, and
   **Mute**
 - **Editing** (track-level): rename, transpose, change instrument, delete a
-  track, or **merge two or more selected tracks into one** (their events are
-  interleaved in time and each keeps its channel) — via the Edit menu or
-  right-click on a track. Full **undo/redo**, an
+  track, or **merge the ticked tracks into one** (their events are interleaved
+  in time and each keeps its channel) — via the Edit menu or right-click on a
+  track. Full **undo/redo**, an
   unsaved-changes (`*`) indicator, and non-destructive **Save As** — the
   original file is never overwritten unless you explicitly choose it
 - Remembers your last-used MIDI output
@@ -72,8 +82,9 @@ pip install -r requirements.txt
 python app.py
 ```
 
-1. **Open** a `.mid` file (or drag one onto the window).
-2. Pick the **track(s)** to play (Ctrl/Shift-click to select several) and your
+1. **Open** a `.mid` file (or drag one onto the window) — open the left drawer
+   with the edge handle if it's hidden.
+2. **Tick** the track(s) to play (they also appear on the piano) and pick your
    **MIDI Output** device.
 3. Press **Play**.
 
@@ -87,15 +98,15 @@ midiplay/
   devices.py           MIDI output enumeration / connection (rtmidi backend)
   engine.py            playback engine: scheduling, transport, seek, panic
   edits.py             track edit operations (rename/transpose/instrument/delete)
-  piano_view.py        Synthesia-style falling-notes window
-  main_window.py       PySide6 window and wiring
+  piano_view.py        Synthesia-style falling-notes piano-roll widget
+  main_window.py       PySide6 window: piano + left control drawer, wiring
 requirements.txt
 ```
 
 ## How it works (the parts that matter for reliability)
 
-- **Timing:** each selected track's events are converted to absolute seconds
-  using a tempo map built from *all* tracks; when several tracks are selected
+- **Timing:** each ticked track's events are converted to absolute seconds
+  using a tempo map built from *all* tracks; when several tracks are ticked
   they're merged into one time-ordered stream, then scheduled on a dedicated
   thread against a monotonic clock (absolute targets, so no drift).
 - **No hanging notes:** Pause/Stop/Loop perform a full "panic" (note-offs +

@@ -1,13 +1,24 @@
 """Main application window.
 
-Lays out the UI (file selector, track list, output dropdown, transport,
-progress bar) and connects it to the playback engine. A QTimer polls the
-engine to drive the progress bar, time labels, and button states.
+The falling-notes piano fills the window and is always visible; all the
+controls (file selector, track list, output dropdown, transport, progress
+bar) live in a drawer that slides out from the left. Timers poll the engine
+to animate the piano (~60 fps) and drive the progress bar, time labels, and
+button states. Ticking a track's checkbox both plays it and shows it on the
+piano; the highlighted row is the target for edits.
 """
 
 import copy
 
-from PySide6.QtCore import Qt, QItemSelectionModel, QSettings, QTimer, Signal
+from PySide6.QtCore import (
+    Qt,
+    QEasingCurve,
+    QPoint,
+    QPropertyAnimation,
+    QSettings,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import QAction, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -33,7 +44,7 @@ from PySide6.QtWidgets import (
 
 from midiplay import devices, edits, smf
 from midiplay.engine import PlaybackEngine, PlayerState
-from midiplay.piano_view import TRACK_COLORS, PianoView
+from midiplay.piano_view import TRACK_COLORS, PianoRollView
 
 # Note-less tracks (e.g. a conductor/tempo track) are shown greyed out.
 EMPTY_TRACK_COLOR = QColor(0x80, 0x80, 0x80)
@@ -115,11 +126,76 @@ def _hline() -> QFrame:
     return line
 
 
+class SlideDrawer(QWidget):
+    """Hosts a `content` widget that fills the whole area, with a `panel` that
+    slides in and out from the left edge as a drawer. A small handle button on
+    the drawer's right edge toggles it with a short animation; the handle rides
+    the drawer's edge so it is reachable whether the drawer is open or closed."""
+
+    def __init__(self, content: QWidget, panel: QWidget, panel_width: int = 340) -> None:
+        super().__init__()
+        self._panel_width = panel_width
+        self._open = True
+
+        self._content = content
+        self._content.setParent(self)
+
+        self._panel = panel
+        self._panel.setParent(self)
+        self._panel.setAutoFillBackground(True)  # opaque over the piano
+        self._panel.setObjectName("drawerPanel")
+        self._panel.setStyleSheet(
+            "#drawerPanel { background: palette(window); "
+            "border-right: 1px solid palette(mid); }"
+        )
+
+        self._handle = QPushButton("‹", self)
+        self._handle.setFixedSize(22, 64)
+        self._handle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._handle.setToolTip("Show or hide the controls")
+        self._handle.clicked.connect(self.toggle)
+
+        self._anim = QPropertyAnimation(self._panel, b"pos", self)
+        self._anim.setDuration(200)
+        self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._anim.valueChanged.connect(self._follow_handle)
+
+        self._panel.raise_()
+        self._handle.raise_()
+
+    def _panel_x(self, is_open: bool) -> int:
+        return 0 if is_open else -self._panel_width
+
+    def resizeEvent(self, event) -> None:
+        self._content.setGeometry(0, 0, self.width(), self.height())
+        self._panel.setGeometry(
+            self._panel_x(self._open), 0, self._panel_width, self.height()
+        )
+        self._place_handle()
+        super().resizeEvent(event)
+
+    def _place_handle(self) -> None:
+        y = max(0, (self.height() - self._handle.height()) // 2)
+        self._handle.move(self._panel.x() + self._panel_width, y)
+
+    def _follow_handle(self, pos) -> None:
+        # Keep the handle glued to the drawer's right edge as it animates.
+        self._handle.move(pos.x() + self._panel_width, self._handle.y())
+
+    def toggle(self) -> None:
+        self._open = not self._open
+        self._handle.setText("‹" if self._open else "›")
+        self._anim.stop()
+        self._anim.setStartValue(self._panel.pos())
+        self._anim.setEndValue(QPoint(self._panel_x(self._open), 0))
+        self._anim.start()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("MIDI Track Player")
-        self.resize(560, 520)
+        self.resize(940, 620)
 
         # Currently loaded file (None until a file is opened).
         self.midi_file = None  # type: ignore[assignment]
@@ -135,29 +211,38 @@ class MainWindow(QMainWindow):
         self._settings = QSettings()  # remembers the last output device
         self.setAcceptDrops(True)     # drag a .mid onto the window
         self._seeking = False         # True while the user drags the seek bar
-        self._piano_window = None     # the falling-notes window, once opened
 
         # Editing state: snapshot-based undo/redo + unsaved-changes tracking.
         self._undo_stack: list = []
         self._redo_stack: list = []
         self._dirty = False
         self._save_path = None        # set once the user has chosen a Save target
-        self._pending_select_row = None  # row to select after a structural edit
+        self._pending_select_row = None    # row to select after a structural edit
+        self._pending_check_indices = None  # tracks to re-check after a structural edit
 
         self._build_menus()
 
-        root = QWidget()
-        layout = QVBoxLayout(root)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        # The controls live in a left drawer over an always-visible piano.
+        panel = QWidget()
+        panel.setMinimumWidth(320)
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(12, 12, 12, 12)
+        panel_layout.setSpacing(10)
+        panel_layout.addLayout(self._build_top())
+        panel_layout.addWidget(_hline())
+        panel_layout.addLayout(self._build_middle())
+        panel_layout.addWidget(_hline())
+        panel_layout.addLayout(self._build_bottom())
 
-        layout.addLayout(self._build_top())
-        layout.addWidget(_hline())
-        layout.addLayout(self._build_middle())
-        layout.addWidget(_hline())
-        layout.addLayout(self._build_bottom())
+        self._roll = PianoRollView()
+        self._roll.notesDeleteRequested.connect(self._delete_notes)
+        self._roll.notesEditRequested.connect(self._edit_notes)
+        self._roll.noteAddRequested.connect(self._add_note)
+        self._roll.playPauseRequested.connect(self._toggle_play_pause)
+        self._roll.scrubFinished.connect(self.engine.seek)
 
-        self.setCentralWidget(root)
+        self._drawer = SlideDrawer(self._roll, panel)
+        self.setCentralWidget(self._drawer)
         self.statusBar().showMessage("No file loaded")
 
         self._refresh_devices()
@@ -172,11 +257,18 @@ class MainWindow(QMainWindow):
         self._ui_timer.start()
         self._update_ui()
 
+        # Animate the always-visible piano from the engine position (~60 fps).
+        self._frame_timer = QTimer(self)
+        self._frame_timer.setInterval(16)
+        self._frame_timer.timeout.connect(self._tick_roll)
+        self._frame_timer.start()
+
         self._update_title()
         self._update_edit_actions()
 
         # Spacebar toggles play/pause (buttons are set NoFocus so they don't
-        # swallow it). The Piano View forwards its own Space via a signal.
+        # swallow it). The piano forwards its own Space via a signal too, but
+        # this window-level shortcut normally handles it first.
         self._space_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         self._space_shortcut.activated.connect(self._toggle_play_pause)
 
@@ -198,15 +290,16 @@ class MainWindow(QMainWindow):
     def _build_middle(self) -> QVBoxLayout:
         col = QVBoxLayout()
 
-        col.addWidget(QLabel("Tracks"))
+        col.addWidget(QLabel("Tracks — tick to play &amp; show on the piano"))
         self.track_list = QListWidget()
         self.track_list.setEnabled(False)  # enabled once a file is loaded
-        # Multi-select so several tracks can play at once (Ctrl/Shift-click);
-        # editing still targets only the focused/"current" track.
+        # Tick a track's checkbox to play it and show it on the piano; the
+        # highlighted (current) row is the target for edits.
         self.track_list.setSelectionMode(
-            QAbstractItemView.SelectionMode.ExtendedSelection
+            QAbstractItemView.SelectionMode.SingleSelection
         )
-        self.track_list.itemSelectionChanged.connect(self._on_selection_changed)
+        self.track_list.currentRowChanged.connect(self._on_edit_target_changed)
+        self.track_list.itemChanged.connect(self._on_track_check_changed)
         self.track_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.track_list.customContextMenuRequested.connect(self._track_context_menu)
         col.addWidget(self.track_list, stretch=1)
@@ -278,16 +371,10 @@ class MainWindow(QMainWindow):
     def _build_options(self) -> QHBoxLayout:
         row = QHBoxLayout()
 
-        self.piano_button = QPushButton("Piano View")
-        self.piano_button.clicked.connect(self._open_piano_view)
-        self.all_tracks_check = QCheckBox("All tracks")
-        self.all_tracks_check.toggled.connect(self._refresh_piano_view)
         self.loop_check = QCheckBox("Loop")
         self.loop_check.toggled.connect(self.engine.set_loop)
         self.mute_check = QCheckBox("Mute")
         self.mute_check.toggled.connect(self.engine.set_muted)
-        row.addWidget(self.piano_button)
-        row.addWidget(self.all_tracks_check)
         row.addWidget(self.loop_check)
         row.addWidget(self.mute_check)
         row.addStretch(1)
@@ -341,19 +428,33 @@ class MainWindow(QMainWindow):
         self.file_path_edit.setText(path)
         self.statusBar().showMessage(f"Loaded: {info.summary()}")
         self._populate_tracks()
+        self._sync_active_tracks(preserve_playhead=False)  # load ticked track(s)
         self._update_title()
         self._update_edit_actions()
 
-    def _populate_tracks(self, select_row: int | None = None) -> None:
-        """Fill the track list from the loaded file. Selects `select_row`
-        (clamped) if given, else the first track that contains notes."""
+    def _populate_tracks(self, select_row: int | None = None, check_indices=None) -> None:
+        """Fill the track list from the loaded file. Each item has a checkbox
+        (ticked tracks play and show on the piano) — `check_indices` sets which
+        are ticked, defaulting to the first track with notes. Selects
+        `select_row` (clamped) if given, else the first track with notes."""
         self.track_infos = smf.track_infos(self.midi_file)
+        if check_indices is None:
+            checked = {smf.first_track_with_notes(self.midi_file)}
+        else:
+            checked = set(check_indices)
 
+        # Block itemChanged while (re)building so setCheckState doesn't fire it.
+        self.track_list.blockSignals(True)
         self.track_list.clear()
         for info in self.track_infos:
             item = QListWidgetItem(info.label())
             item.setData(Qt.ItemDataRole.UserRole, info.index)
-            # Color the title to match the All-tracks view; grey out empties.
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked if info.index in checked
+                else Qt.CheckState.Unchecked
+            )
+            # Color the title to match the piano; grey out note-less tracks.
             if info.has_notes:
                 item.setForeground(TRACK_COLORS[info.index % len(TRACK_COLORS)])
             else:
@@ -365,28 +466,24 @@ class MainWindow(QMainWindow):
             select_row = smf.first_track_with_notes(self.midi_file)
         select_row = max(0, min(select_row, self.track_list.count() - 1))
         self.track_list.setCurrentRow(select_row)
+        self.track_list.blockSignals(False)
 
     def selected_track_index(self) -> int | None:
-        """0-based index of the *primary* track — the focused/current one,
-        which is the single track that edits apply to. None if nothing is
-        selected."""
+        """0-based index of the highlighted (current) track — the single track
+        that edits apply to. None if the list is empty."""
         item = self.track_list.currentItem()
-        if item is not None and item.isSelected():
-            return item.data(Qt.ItemDataRole.UserRole)
-        # Fall back to the topmost selected track (e.g. after a range select).
-        selected = self.track_list.selectedItems()
-        if not selected:
+        if item is None:
             return None
-        item = min(selected, key=self.track_list.row)
         return item.data(Qt.ItemDataRole.UserRole)
 
-    def selected_track_indices(self) -> list[int]:
-        """0-based indices of every selected track, in file order. These are
-        the tracks that play simultaneously."""
-        indices = [
-            item.data(Qt.ItemDataRole.UserRole)
-            for item in self.track_list.selectedItems()
-        ]
+    def checked_track_indices(self) -> list[int]:
+        """0-based indices of every ticked track, in file order. These are the
+        tracks that play simultaneously and are shown on the piano."""
+        indices = []
+        for row in range(self.track_list.count()):
+            item = self.track_list.item(row)
+            if item.checkState() == Qt.CheckState.Checked:
+                indices.append(item.data(Qt.ItemDataRole.UserRole))
         return sorted(indices)
 
     # -- MIDI output devices ----------------------------------------------
@@ -455,19 +552,39 @@ class MainWindow(QMainWindow):
                 self.device_combo.setCurrentIndex(index)
                 self.device_combo.blockSignals(False)
 
-    def _on_selection_changed(self) -> None:
-        """User changed which track(s) are selected: stop and load them all
-        into the engine so the total time shows and seeking works before the
-        first Play. Multiple selected tracks play simultaneously."""
-        self.engine.stop()
-        tracks = self.selected_track_indices()
-        if self.midi_file is not None and tracks:
-            self.engine.set_tracks(self.midi_file, tracks)
-            self._prepared_key = (id(self.midi_file), tuple(tracks))
-        else:
-            self._prepared_key = None
+    def _on_edit_target_changed(self, *_args) -> None:
+        """User highlighted a different row: it becomes the edit target, so
+        re-emphasize it on the piano. Playback set (the ticked tracks) is
+        unaffected."""
         self._refresh_piano_view()
         self._update_edit_actions()
+
+    def _on_track_check_changed(self, _item=None) -> None:
+        """User ticked/unticked a track: it now (or no longer) plays and shows
+        on the piano. Reload the engine with the ticked set, keeping the
+        playhead so toggling doesn't restart the song."""
+        self._sync_active_tracks(preserve_playhead=True)
+        self._update_edit_actions()
+
+    def _sync_active_tracks(self, preserve_playhead: bool) -> None:
+        """Load the ticked tracks into the engine (what plays) and refresh the
+        piano to match. When `preserve_playhead`, keep the current position and
+        play state across the reload; otherwise start fresh from 0."""
+        checked = self.checked_track_indices()
+        if not (self.midi_file is not None and checked):
+            self.engine.stop()
+            self._prepared_key = None
+            self._refresh_piano_view()
+            return
+        position = self.engine.position()
+        was_playing = self.engine.state() == PlayerState.PLAYING
+        self.engine.set_tracks(self.midi_file, checked)  # stops + resets to 0
+        self._prepared_key = (id(self.midi_file), tuple(checked))
+        if preserve_playhead:
+            self.engine.seek(min(position, self.engine.duration()))
+            if was_playing:
+                self.engine.play()
+        self._refresh_piano_view()
 
     def _ensure_port(self) -> bool:
         """Make sure the selected output port is open and handed to the
@@ -505,9 +622,9 @@ class MainWindow(QMainWindow):
         if self.midi_file is None:
             self.statusBar().showMessage("Open a MIDI file first")
             return False
-        tracks = self.selected_track_indices()
+        tracks = self.checked_track_indices()
         if not tracks:
-            self.statusBar().showMessage("Select a track to play")
+            self.statusBar().showMessage("Tick a track to play")
             return False
         if not self._ensure_port():
             return False
@@ -554,37 +671,27 @@ class MainWindow(QMainWindow):
     # -- Seeking ----------------------------------------------------------
     def _on_seek_started(self) -> None:
         self._seeking = True
-        if self._piano_window is not None:
-            self._piano_window.preview_begin()
+        self._roll.begin_scrub()
 
     def _on_seek_moved(self, value: int) -> None:
-        # Live time readout while scrubbing (audio jumps only on release).
+        # Live time readout + falling-notes preview while scrubbing (audio jumps
+        # only on release).
         duration = self.engine.duration()
         seconds = value / 1000 * duration
         self.current_time_label.setText(format_time(seconds))
-        if self._piano_window is not None:
-            self._piano_window.preview_position(seconds)  # live falling-notes update
+        self._roll.set_scrub_position(seconds)
 
     def _on_seek_finished(self, value: int) -> None:
         self._seeking = False
         duration = self.engine.duration()
         if duration > 0:
             self.engine.seek(value / 1000 * duration)
-        if self._piano_window is not None:
-            self._piano_window.preview_end()
+        self._roll.end_scrub()
 
     # -- Piano (falling-notes) view --------------------------------------
-    def _open_piano_view(self) -> None:
-        if self._piano_window is None:
-            self._piano_window = PianoView(self.engine)
-            self._piano_window.notes_delete_requested.connect(self._delete_notes)
-            self._piano_window.notes_edit_requested.connect(self._edit_notes)
-            self._piano_window.note_add_requested.connect(self._add_note)
-            self._piano_window.play_pause_requested.connect(self._toggle_play_pause)
-        self._refresh_piano_view()
-        self._piano_window.show()
-        self._piano_window.raise_()
-        self._piano_window.activateWindow()
+    def _tick_roll(self) -> None:
+        """Advance the always-visible piano to the engine's position."""
+        self._roll.set_position(self.engine.position())
 
     def _delete_notes(self, note_ids) -> None:
         """Delete the given notes from the selected track (via undo-able edit)."""
@@ -609,29 +716,19 @@ class MainWindow(QMainWindow):
         self._apply_track_edit(index, lambda m: edits.add_note(m, index, pitch, start_tick))
 
     def _refresh_piano_view(self, *_args) -> None:
-        """Push the right content into the piano view based on the All-tracks
-        toggle and how many tracks are selected. Called when the track, file,
-        or toggle changes."""
-        if self._piano_window is None:
+        """Show the ticked tracks on the piano, color-coded, with the current
+        edit-target row emphasized (and editable) and the rest dimmed. Called
+        when the ticked set, the highlighted row, or the file changes."""
+        if self.midi_file is None:
+            self._roll.set_multi_notes([], 0.0, None)
             return
-        if self.midi_file is not None:
-            self._piano_window.set_time_map(smf.TimeMap(self.midi_file))
+        self._roll.set_time_map(smf.TimeMap(self.midi_file))
+        checked = self.checked_track_indices()
+        # The edit target is emphasized only when it is itself shown; otherwise
+        # nothing is editable, matching what's visible.
         primary = self.selected_track_index()
-        selected = self.selected_track_indices()
-        if self.all_tracks_check.isChecked() and self.midi_file is not None:
-            per_track = smf.extract_all_notes(self.midi_file)
-            self._piano_window.set_multi_notes(
-                per_track, self.engine.duration(), primary
-            )
-        elif self.midi_file is not None and len(selected) > 1:
-            # Several tracks playing: show them color-coded, the primary
-            # (editable) one emphasized and the rest dimmed.
-            per_track = smf.extract_notes_for(self.midi_file, selected)
-            self._piano_window.set_multi_notes(
-                per_track, self.engine.duration(), primary
-            )
-        else:
-            self._piano_window.refresh_notes()
+        per_track = smf.extract_notes_for(self.midi_file, checked)
+        self._roll.set_multi_notes(per_track, self.engine.duration(), primary)
 
     # -- Drag and drop ----------------------------------------------------
     def dragEnterEvent(self, event) -> None:
@@ -674,7 +771,7 @@ class MainWindow(QMainWindow):
 
         ready = (
             self.midi_file is not None
-            and self.selected_track_index() is not None
+            and bool(self.checked_track_indices())
             and self.selected_device_name() is not None
         )
         playing = state == PlayerState.PLAYING
@@ -718,22 +815,13 @@ class MainWindow(QMainWindow):
         item = self.track_list.itemAt(pos)
         if item is None:
             return
-        # Make the right-clicked track the edit target. If it's already part
-        # of a multi-selection, keep that selection (so playback isn't
-        # disrupted) and just move the "current" focus to it; otherwise select
-        # it alone.
-        if item.isSelected():
-            self.track_list.setCurrentItem(
-                item, QItemSelectionModel.SelectionFlag.NoUpdate
-            )
-        else:
-            self.track_list.setCurrentItem(item)
+        self.track_list.setCurrentItem(item)  # right-clicked track = edit target
         menu = QMenu(self)
         menu.addAction("Rename…", self._edit_rename)
         menu.addAction("Transpose…", self._edit_transpose)
         menu.addAction("Change Instrument…", self._edit_instrument)
         menu.addSeparator()
-        merge = menu.addAction("Merge Selected Tracks", self._edit_merge)
+        merge = menu.addAction("Merge Ticked Tracks", self._edit_merge)
         merge.setEnabled(self.act_merge.isEnabled())
         delete = menu.addAction("Delete Track", self._edit_delete)
         delete.setEnabled(self.act_delete.isEnabled())
@@ -781,15 +869,22 @@ class MainWindow(QMainWindow):
             QMessageBox.question(self, "Delete Track", f"Delete '{name}'?")
             == QMessageBox.StandardButton.Yes
         ):
+            # Keep the surviving ticked tracks ticked (indices above the
+            # deleted one shift down by one).
+            checked = set(self.checked_track_indices())
+            remapped = {(i - 1 if i > index else i) for i in checked if i != index}
+            self._pending_check_indices = remapped or None
             self._apply_file_edit(lambda m: edits.delete_track(m, index))
 
     def _edit_merge(self) -> None:
-        indices = self.selected_track_indices()
+        indices = self.checked_track_indices()  # merge the ticked tracks
         if self.midi_file is None or len(indices) < 2:
             return
-        # The merged track lands at the earliest selected position; select it
-        # once the list is rebuilt so playback continues on the combined track.
-        self._pending_select_row = min(indices)
+        # The merged track lands at the earliest ticked position; select it and
+        # keep it ticked so playback/piano continue on the combined track.
+        target = min(indices)
+        self._pending_select_row = target
+        self._pending_check_indices = {target}
         self._apply_file_edit(lambda m: edits.merge_tracks(m, indices))
         self.statusBar().showMessage(f"Merged {len(indices)} tracks into one")
 
@@ -867,8 +962,9 @@ class MainWindow(QMainWindow):
         changes (add/delete track) do a full repopulate. Reloads the engine
         track and piano view exactly once."""
         self.track_infos = smf.track_infos(self.midi_file)
-        self.track_list.blockSignals(True)
         if self.track_list.count() == len(self.track_infos):
+            # In-place update (note edits, rename, transpose…): keep the ticks.
+            self.track_list.blockSignals(True)
             for i, info in enumerate(self.track_infos):
                 item = self.track_list.item(i)
                 item.setText(info.label())
@@ -877,21 +973,20 @@ class MainWindow(QMainWindow):
                     TRACK_COLORS[info.index % len(TRACK_COLORS)]
                     if info.has_notes else EMPTY_TRACK_COLOR
                 )
+            self.track_list.blockSignals(False)
         else:
+            # Structural change (add/delete/merge): rebuild, restoring the
+            # ticked set and selection the edit handler asked for.
             row = self._pending_select_row
             if row is None:
                 row = self.track_list.currentRow()
             row = max(0, min(row, len(self.track_infos) - 1))
-            self._populate_tracks(select_row=row)
-        self.track_list.blockSignals(False)
+            self._populate_tracks(select_row=row, check_indices=self._pending_check_indices)
         self._pending_select_row = None
+        self._pending_check_indices = None
 
-        tracks = self.selected_track_indices()
         self._prepared_key = None
-        if tracks and self.midi_file is not None:
-            self.engine.set_tracks(self.midi_file, tracks)
-            self._prepared_key = (id(self.midi_file), tuple(tracks))
-        self._refresh_piano_view()
+        self._sync_active_tracks(preserve_playhead=False)  # _commit_change restores it
         self._update_title()
         self._update_edit_actions()
 
@@ -948,7 +1043,7 @@ class MainWindow(QMainWindow):
         self.act_delete.setEnabled(
             has_track and has_file and len(self.midi_file.tracks) > 1
         )
-        self.act_merge.setEnabled(has_file and len(self.selected_track_indices()) >= 2)
+        self.act_merge.setEnabled(has_file and len(self.checked_track_indices()) >= 2)
         self.act_save.setEnabled(has_file)
         self.act_save_as.setEnabled(has_file)
         self.act_undo.setEnabled(bool(self._undo_stack))
@@ -973,8 +1068,6 @@ class MainWindow(QMainWindow):
                 if self._dirty:  # save was cancelled
                     event.ignore()
                     return
-        if self._piano_window is not None:
-            self._piano_window.close()
         self.engine.stop()
         self._close_port()
         super().closeEvent(event)
