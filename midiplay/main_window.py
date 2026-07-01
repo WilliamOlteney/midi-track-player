@@ -62,9 +62,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import mido
+
 from midiplay import devices, edits, smf, theme as themes
 from midiplay.engine import PlaybackEngine, PlayerState
 from midiplay.piano_view import TRACK_COLORS, PianoRollView, note_name
+from midiplay.recorder import Recorder
 
 # Note-less tracks (e.g. a conductor/tempo track) are shown greyed out.
 EMPTY_TRACK_COLOR = QColor(0x80, 0x80, 0x80)
@@ -480,6 +483,16 @@ class MainWindow(QMainWindow):
         self._port_name = None
         self._prepared_key = None  # (id(midi_file), track_index) already loaded
 
+        # Recording: input port + recorder, metronome, and count-in state.
+        self.recorder = Recorder()
+        self._in_port = None
+        self._in_port_name = None
+        self._time_map = None          # smf.TimeMap for the loaded file
+        self._recording = False
+        self._record_track = None      # armed track index while recording
+        self._metro_last_beat = -1     # last beat index the metronome clicked
+        self._countin = None           # active count-in state, or None
+
         self._settings = QSettings()  # remembers the last output device
         self.setAcceptDrops(True)     # drag a .mid onto the window
         self._seeking = False         # True while the user drags the seek bar
@@ -559,6 +572,15 @@ class MainWindow(QMainWindow):
         self._frame_timer.timeout.connect(self._tick_roll)
         self._frame_timer.start()
 
+        # Metronome: poll the engine position and click on each new beat.
+        self._metro_timer = QTimer(self)
+        self._metro_timer.setInterval(8)
+        self._metro_timer.timeout.connect(self._metronome_tick)
+        self._metro_timer.start()
+
+        self._refresh_inputs()
+        self._restore_last_input()
+
         self._update_title()
         self._update_edit_actions()
 
@@ -623,6 +645,17 @@ class MainWindow(QMainWindow):
         device_row.addWidget(self.channel_combo)
         device_row.addWidget(self.refresh_button)
         col.addLayout(device_row)
+
+        input_row = QHBoxLayout()
+        self.input_combo = QComboBox()
+        self.input_combo.setToolTip("MIDI input to record from")
+        self.input_combo.currentIndexChanged.connect(self._on_input_changed)
+        self.input_refresh_button = QPushButton("Refresh")
+        self.input_refresh_button.clicked.connect(self._refresh_inputs)
+        input_row.addWidget(QLabel("MIDI Input:"))
+        input_row.addWidget(self.input_combo, stretch=1)
+        input_row.addWidget(self.input_refresh_button)
+        col.addLayout(input_row)
         return col
 
     # -- Bottom: transport + progress -------------------------------------
@@ -634,15 +667,18 @@ class MainWindow(QMainWindow):
         self.pause_button = QPushButton("Pause")
         self.stop_button = QPushButton("Stop")
         self.restart_button = QPushButton("Restart")
+        self.record_button = QPushButton("● Rec")
         self.play_button.clicked.connect(self._on_play)
         self.pause_button.clicked.connect(self._on_pause)
         self.stop_button.clicked.connect(self._on_stop)
         self.restart_button.clicked.connect(self._on_restart)
+        self.record_button.clicked.connect(self._on_record)
         for button in (
             self.play_button,
             self.pause_button,
             self.stop_button,
             self.restart_button,
+            self.record_button,
         ):
             button.setEnabled(False)  # _update_ui manages this from here on
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # let Space be a shortcut
@@ -839,6 +875,32 @@ class MainWindow(QMainWindow):
         scale_row.addWidget(self.scale_type_combo, stretch=1)
         col.addLayout(scale_row)
 
+        col.addWidget(_hline())
+        col.addWidget(QLabel("Recording"))
+        self.monitor_check = QCheckBox("Monitor input (thru)")
+        self.monitor_check.setToolTip("Echo the MIDI input to the output while recording")
+        self.monitor_check.toggled.connect(
+            lambda on: self._settings.setValue("monitor", on)
+        )
+        col.addWidget(self.monitor_check)
+        self.metro_check = QCheckBox("Metronome")
+        self.metro_check.setToolTip("Click on each beat (sent to the MIDI output)")
+        self.metro_check.toggled.connect(
+            lambda on: self._settings.setValue("metronome", on)
+        )
+        col.addWidget(self.metro_check)
+        countin_row = QHBoxLayout()
+        self.countin_spin = QSpinBox()
+        self.countin_spin.setRange(0, 4)
+        self.countin_spin.setToolTip("Bars of count-in before recording (needs metronome)")
+        self.countin_spin.valueChanged.connect(
+            lambda v: self._settings.setValue("count_in", v)
+        )
+        countin_row.addWidget(QLabel("Count-in bars"))
+        countin_row.addWidget(self.countin_spin)
+        countin_row.addStretch(1)
+        col.addLayout(countin_row)
+
         col.addStretch(1)
         return panel
 
@@ -988,6 +1050,9 @@ class MainWindow(QMainWindow):
         scale_type = self._settings.value("scale_type", "Major")
         if scale_type not in SCALES:
             scale_type = "Major"
+        monitor = self._settings.value("monitor", True, type=bool)
+        metronome = self._settings.value("metronome", False, type=bool)
+        count_in = max(0, min(4, int(self._settings.value("count_in", 1))))
 
         self.theme_combo.setCurrentText(theme.name)
         self.opacity_slider.setValue(opacity)
@@ -1004,6 +1069,9 @@ class MainWindow(QMainWindow):
         self.scale_type_combo.setCurrentText(scale_type)
         self.scale_root_combo.setEnabled(scale_on)
         self.scale_type_combo.setEnabled(scale_on)
+        self.monitor_check.setChecked(monitor)
+        self.metro_check.setChecked(metronome)
+        self.countin_spin.setValue(count_in)
 
         self.opacity_label.setText(f"{opacity}%")
         self.lookahead_label.setText(f"{look_ahead}s")
@@ -1045,6 +1113,7 @@ class MainWindow(QMainWindow):
         self.engine.stop()
         self.midi_file = midi
         self.file_info = info
+        self._time_map = smf.TimeMap(midi)  # tick<->seconds for recording/metronome
         self._prepared_key = None  # force the engine to reload the new file
         self._undo_stack.clear()
         self._redo_stack.clear()
@@ -1181,6 +1250,73 @@ class MainWindow(QMainWindow):
                 self.device_combo.setCurrentIndex(index)
                 self.device_combo.blockSignals(False)
 
+    # -- MIDI input devices (recording) -----------------------------------
+    def _refresh_inputs(self) -> None:
+        """(Re)populate the input dropdown, keeping the current choice if it's
+        still present. Disables it when no inputs are found."""
+        previous = self.selected_input_name()
+        try:
+            inputs = devices.list_inputs()
+        except Exception as exc:
+            inputs = []
+            self.statusBar().showMessage(f"Could not list MIDI inputs: {exc}")
+        self.input_combo.blockSignals(True)
+        self.input_combo.clear()
+        if inputs:
+            self.input_combo.addItems(inputs)
+            self.input_combo.setEnabled(True)
+            if previous in inputs:
+                self.input_combo.setCurrentText(previous)
+        else:
+            self.input_combo.addItem("No MIDI inputs found")
+            self.input_combo.setEnabled(False)
+        self.input_combo.blockSignals(False)
+
+    def selected_input_name(self) -> str | None:
+        if not self.input_combo.isEnabled():
+            return None
+        return self.input_combo.currentText() or None
+
+    def _on_input_changed(self, _index: int = -1) -> None:
+        self._close_input_port()
+        name = self.selected_input_name()
+        if name:
+            self._settings.setValue("input_device", name)
+
+    def _restore_last_input(self) -> None:
+        last = self._settings.value("input_device", "")
+        if last and self.input_combo.isEnabled():
+            index = self.input_combo.findText(last)
+            if index >= 0:
+                self.input_combo.blockSignals(True)
+                self.input_combo.setCurrentIndex(index)
+                self.input_combo.blockSignals(False)
+
+    def _ensure_input_port(self) -> bool:
+        name = self.selected_input_name()
+        if name is None:
+            self.statusBar().showMessage("No MIDI input available to record from")
+            return False
+        if self._in_port is not None and self._in_port_name == name:
+            return True
+        self._close_input_port()
+        try:
+            self._in_port = devices.open_input(name)
+        except Exception as exc:
+            QMessageBox.warning(self, "MIDI input error", f"Could not open '{name}':\n{exc}")
+            return False
+        self._in_port_name = name
+        return True
+
+    def _close_input_port(self) -> None:
+        if self._in_port is not None:
+            try:
+                self._in_port.close()
+            except Exception:
+                pass
+        self._in_port = None
+        self._in_port_name = None
+
     def _on_edit_target_changed(self, *_args) -> None:
         """User highlighted a different row: it becomes the edit target, so
         re-emphasize it on the piano. Show/play sets are unaffected."""
@@ -1297,6 +1433,8 @@ class MainWindow(QMainWindow):
             self._on_play()
 
     def _on_stop(self) -> None:
+        if self._recording or self._countin:
+            self._stop_recording()
         self.engine.stop()
 
     def _on_restart(self) -> None:
@@ -1305,6 +1443,132 @@ class MainWindow(QMainWindow):
 
     def _on_speed_changed(self, multiplier: float) -> None:
         self.engine.set_speed(multiplier)
+
+    # -- Recording --------------------------------------------------------
+    CLICK_HI = 76   # GM High Wood Block (metronome downbeat)
+    CLICK_LO = 77   # GM Low Wood Block (other beats)
+
+    def _on_record(self) -> None:
+        if self._recording or self._countin:
+            self._stop_recording()
+        else:
+            self._start_recording()
+
+    def _start_recording(self) -> None:
+        if self.midi_file is None or self._time_map is None:
+            self.statusBar().showMessage("Open a MIDI file first")
+            return
+        track = self.selected_track_index()
+        if track is None:
+            self.statusBar().showMessage("Select a track to record into")
+            return
+        if not self._ensure_port():        # output: thru + metronome + playback
+            return
+        if not self._ensure_input_port():  # input to record from
+            return
+        self._record_track = track
+        self.recorder.set_input(self._in_port)
+        self.recorder.set_thru(self._port if self.monitor_check.isChecked() else None)
+        bars = self.countin_spin.value() if self.metro_check.isChecked() else 0
+        if bars > 0:
+            self._begin_countin(bars)
+        else:
+            self._begin_capture()
+
+    def _begin_countin(self, bars: int) -> None:
+        self._countin = True
+        self._countin_left = bars * 4  # assume 4/4
+        self._countin_beat = 0
+        self._countin_timer = QTimer(self)
+        self._countin_timer.setInterval(int(self._seconds_per_beat() * 1000))
+        self._countin_timer.timeout.connect(self._countin_tick)
+        self.statusBar().showMessage("Count-in…")
+        self._countin_tick()       # click the first beat now
+        self._countin_timer.start()
+
+    def _countin_tick(self) -> None:
+        if not self._countin:
+            self._countin_timer.stop()
+            return
+        if self._countin_left <= 0:
+            self._countin_timer.stop()
+            self._countin = False
+            self._begin_capture()
+            return
+        self._click(self._countin_beat % 4 == 0)
+        self._countin_beat += 1
+        self._countin_left -= 1
+
+    def _begin_capture(self) -> None:
+        self._metro_last_beat = -1
+        if self._prepare():
+            self.engine.seek(self.engine.position())
+        self.engine.play()          # existing tracks play for context
+        self.recorder.start(self.engine.position)
+        self._recording = True
+        self.statusBar().showMessage("● Recording…")
+
+    def _stop_recording(self) -> None:
+        if self._countin:
+            self._countin = False
+            self._countin_timer.stop()
+        events = self.recorder.stop()
+        self._recording = False
+        self.engine.pause()         # keep the playhead where it stopped
+        if events and self._record_track is not None and self._time_map is not None:
+            timed = [
+                (int(round(self._time_map.seconds_to_ticks(max(0.0, sec)))), msg)
+                for sec, msg in events
+            ]
+            index = self._record_track
+            self._apply_track_edit(index, lambda m: edits.insert_recorded(m, index, timed))
+            self.statusBar().showMessage(
+                f"Recorded {len(events)} events into track {index + 1}"
+            )
+        self._record_track = None
+
+    def _seconds_per_beat(self) -> float:
+        if self._time_map is None:
+            return 0.5
+        tpb = self._time_map.ticks_per_beat
+        beat = int(self._time_map.seconds_to_ticks(self.engine.position()) // tpb)
+        t0 = self._time_map.tick_to_seconds(beat * tpb)
+        t1 = self._time_map.tick_to_seconds((beat + 1) * tpb)
+        return max(0.05, t1 - t0)
+
+    def _metronome_tick(self) -> None:
+        """Click on each new beat while playing (polled from the engine)."""
+        if not (self.metro_check.isChecked() and self._port is not None):
+            return
+        if self.engine.state() != PlayerState.PLAYING or self._time_map is None:
+            self._metro_last_beat = -1
+            return
+        tpb = self._time_map.ticks_per_beat
+        beat = int(self._time_map.seconds_to_ticks(self.engine.position()) // tpb)
+        if beat != self._metro_last_beat:
+            if beat > self._metro_last_beat:
+                self._click(beat % 4 == 0)  # accent bar starts (4/4)
+            self._metro_last_beat = beat
+
+    def _click(self, accent: bool) -> None:
+        if self._port is None:
+            return
+        note = self.CLICK_HI if accent else self.CLICK_LO
+        try:
+            self._port.send(mido.Message(
+                "note_on", note=note, velocity=112 if accent else 80, channel=9
+            ))
+            QTimer.singleShot(60, lambda: self._click_off(note))
+        except Exception:
+            pass
+
+    def _click_off(self, note: int) -> None:
+        if self._port is None:
+            return
+        try:
+            self._port.send(mido.Message("note_off", note=note, velocity=0, channel=9))
+        except Exception:
+            pass
 
     # -- Seeking ----------------------------------------------------------
     def _on_seek_started(self) -> None:
@@ -1436,10 +1700,20 @@ class MainWindow(QMainWindow):
         )
         playing = state == PlayerState.PLAYING
         paused = state == PlayerState.PAUSED
-        self.play_button.setEnabled(ready and not playing)
-        self.pause_button.setEnabled(playing)
-        self.stop_button.setEnabled(playing or paused)
-        self.restart_button.setEnabled(ready)
+        recording = bool(self._recording or self._countin)
+        self.play_button.setEnabled(ready and not playing and not recording)
+        self.pause_button.setEnabled(playing and not recording)
+        self.stop_button.setEnabled(playing or paused or recording)
+        self.restart_button.setEnabled(ready and not recording)
+
+        can_record = (
+            self.midi_file is not None
+            and self.selected_track_index() is not None
+            and self.selected_input_name() is not None
+            and self.selected_device_name() is not None
+        )
+        self.record_button.setEnabled(can_record or recording)
+        self.record_button.setText("■ Stop" if recording else "● Rec")
 
     # -- Editing: menus ---------------------------------------------------
     def _build_menus(self) -> None:
@@ -1758,6 +2032,11 @@ class MainWindow(QMainWindow):
                 if self._dirty:  # save was cancelled
                     event.ignore()
                     return
+        if self._recording or self._countin:
+            self._countin = False
+            self.recorder.stop()
+            self._recording = False
         self.engine.stop()
         self._close_port()
+        self._close_input_port()
         super().closeEvent(event)

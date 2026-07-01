@@ -257,6 +257,46 @@ def add_notes(midi: mido.MidiFile, index: int, notes) -> None:
     _rebuild_track(track, abs_events)
 
 
+def insert_recorded(midi: mido.MidiFile, index: int, timed_msgs) -> None:
+    """Merge recorded (abs_tick, message) events into a track (overdub).
+
+    Each message is placed at its tick with the track's channel; note-ons still
+    held at the end (e.g. a key down when recording stopped) are closed with a
+    note-off at the last tick so nothing hangs. Meta messages are ignored."""
+    track = midi.tracks[index]
+    channel = _track_channel(track)
+
+    abs_events: list[tuple[int, mido.Message]] = []
+    tick = 0
+    for msg in track:
+        tick += msg.time
+        abs_events.append((tick, msg))
+
+    max_tick = max([t for t, _ in abs_events] + [0])
+    open_notes: dict[int, int] = {}  # pitch -> number of note-ons still open
+    for t, msg in timed_msgs:
+        if msg.is_meta:
+            continue
+        m = msg.copy(time=0)
+        if hasattr(m, "channel"):
+            m.channel = channel
+        t = max(0, int(t))
+        max_tick = max(max_tick, t)
+        abs_events.append((t, m))
+        if m.type == "note_on" and m.velocity > 0:
+            open_notes[m.note] = open_notes.get(m.note, 0) + 1
+        elif m.type == "note_off" or (m.type == "note_on" and m.velocity == 0):
+            if open_notes.get(m.note):
+                open_notes[m.note] -= 1
+
+    for pitch, count in open_notes.items():
+        for _ in range(count):
+            abs_events.append(
+                (max_tick, mido.Message("note_off", note=pitch, velocity=0, channel=channel))
+            )
+    _rebuild_track(track, abs_events)
+
+
 def merge_tracks(midi: mido.MidiFile, indices) -> int:
     """Merge two or more tracks into one, replacing them with a single track
     at the position of the earliest selected. Returns the merged track's index.
