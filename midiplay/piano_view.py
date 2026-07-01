@@ -74,12 +74,14 @@ TRACK_COLORS = (
 
 @dataclass
 class _VNote:
-    """A note prepared for drawing: the note plus its base color and whether
-    it belongs to a non-emphasized track (drawn dimmer)."""
+    """A note prepared for drawing: the note plus its base color, whether it
+    belongs to a non-emphasized track (drawn dimmer / not the edit target), and
+    which track it came from."""
 
     note: Note
     color: QColor
     dim: bool
+    track_index: int = -1
 
 
 def _is_white(pitch: int) -> bool:
@@ -109,6 +111,7 @@ class PianoRollView(QWidget):
     playPauseRequested = Signal()
     legendToggled = Signal(bool)           # legend shown/hidden (e.g. via 'H')
     selectionChanged = Signal()            # the set of selected notes changed
+    trackRetargetRequested = Signal(int)   # make this track the edit target
 
     def __init__(self) -> None:
         super().__init__()
@@ -142,6 +145,18 @@ class PianoRollView(QWidget):
         self._pending_selection = None  # selection to restore after an edit reload
         self._marquee = None           # (start, current) QPointF while box-selecting
         self._press_pos = None         # left-press point (to tell a click from a drag)
+
+        # Scale/key lock: constrain pitch edits to a scale.
+        self._scale_lock = False
+        self._scale_root = 0                       # 0 = C … 11 = B
+        self._scale_mask = set(range(12))          # allowed pitch classes (from root)
+        # Draw mode: drag on empty grid to create a note of the dragged length.
+        self._draw_mode = False
+        self._draw = None                          # active draw gesture, or None
+        # Velocity lane: a strip above the keyboard with draggable velocity bars.
+        self._vel_lane = False
+        self._vel_dragging = False
+        self._vel_drag = None
 
         # Scrubbing: while active, the engine's position is ignored and the
         # view follows the scrub position instead.
@@ -202,6 +217,44 @@ class PianoRollView(QWidget):
 
     def set_quantize_strength(self, strength: float) -> None:
         self._quant_strength = max(0.0, min(1.0, float(strength)))
+
+    def set_scale(self, enabled: bool, root: int = 0, mask=None) -> None:
+        """Constrain pitch edits to a scale: `root` is 0..11 (C..B) and `mask`
+        the allowed pitch classes relative to the root (None = chromatic)."""
+        self._scale_lock = bool(enabled)
+        self._scale_root = int(root) % 12
+        self._scale_mask = set(mask) if mask else set(range(12))
+        self.update()
+
+    def set_draw_mode(self, on: bool) -> None:
+        self._draw_mode = bool(on)
+
+    def set_velocity_lane(self, on: bool) -> None:
+        self._vel_lane = bool(on)
+        self.update()
+
+    def _scale_allows(self, pitch: int) -> bool:
+        return not self._scale_lock or ((pitch - self._scale_root) % 12) in self._scale_mask
+
+    def _scale_snap_pitch(self, pitch: int) -> int:
+        """Nearest allowed pitch under the scale lock (unchanged if lock off)."""
+        if self._scale_allows(pitch):
+            return pitch
+        for d in range(1, 12):
+            for cand in (pitch - d, pitch + d):
+                if 0 <= cand <= 127 and self._scale_allows(cand):
+                    return cand
+        return pitch
+
+    def _scale_step(self, pitch: int, direction: int) -> int:
+        """Next allowed pitch above/below (for arrow moves under scale lock)."""
+        step = 1 if direction > 0 else -1
+        p = pitch + step
+        while 0 <= p <= 127:
+            if self._scale_allows(p):
+                return p
+            p += step
+        return pitch
 
     def _set_selection(self, ids) -> None:
         """Replace the selection and notify listeners (e.g. the inspector)."""
@@ -267,7 +320,7 @@ class PianoRollView(QWidget):
             color = TRACK_COLORS[track_index % len(TRACK_COLORS)]
             dim = primary_index is not None and track_index != primary_index
             for n in notes:
-                self._vnotes.append(_VNote(n, color, dim))
+                self._vnotes.append(_VNote(n, color, dim, track_index))
                 pitches.append(n.pitch)
         self._duration = duration
         self._overlay.clear()
@@ -319,7 +372,10 @@ class PianoRollView(QWidget):
         self._scrubbing = False
 
     def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton and self._in_vel_lane(event.position()):
+            self._begin_vel_lane(event.position())
+            event.accept()
+        elif event.button() == Qt.MouseButton.LeftButton:
             self._left_press(event)
             event.accept()
         elif event.button() == Qt.MouseButton.MiddleButton:
@@ -337,11 +393,21 @@ class PianoRollView(QWidget):
         marquee (drag-box) selection on empty grid."""
         pos = event.position()
         self.setFocus()
-        if pos.y() > self.height() - self._keyboard_height():
+        if pos.y() > self._notes_bottom():
             return  # on the keyboard, not the note area
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         vnote = self._hit_test(pos)
         if vnote is None:
+            other = self._hit_test_any(pos)
+            if other is not None and other.dim:
+                # Clicked a note on another shown track: make it the edit target
+                # and select the clicked note once it reloads emphasized.
+                self._pending_selection = {other.note.id}
+                self.trackRetargetRequested.emit(other.track_index)
+                return
+            if self._draw_mode and self._time_map is not None:
+                self._begin_draw(pos, event)
+                return
             # Begin a marquee; base is the current selection when Ctrl-adding.
             self._marquee = {
                 "start": pos, "cur": pos,
@@ -375,7 +441,7 @@ class PianoRollView(QWidget):
 
     def _edge_mode(self, vnote, pos) -> str:
         geo, _ = self._key_geometry(self.width())
-        notes_bottom = self.height() - self._keyboard_height()
+        notes_bottom = self._notes_bottom()
         rect = self._note_rect(vnote.note, geo, notes_bottom)
         if rect is None or rect.height() < 2 * EDGE_PX + 4:
             return "move"
@@ -387,7 +453,7 @@ class PianoRollView(QWidget):
 
     def _update_drag(self, event) -> None:
         pos = event.position()
-        notes_bottom = self.height() - self._keyboard_height()
+        notes_bottom = self._notes_bottom()
         if notes_bottom <= 0:
             return
         dy = pos.y() - self._drag["start"].y()
@@ -405,6 +471,7 @@ class PianoRollView(QWidget):
                 new_start = self._shift(s_tick, d_seconds, no_snap)
                 d_pitch = self._pitch_at_x(pos.x()) - self._drag["anchor_pitch"]
                 new_pitch = max(self._lo, min(self._hi, pitch + d_pitch))
+                new_pitch = self._scale_snap_pitch(new_pitch)  # obey scale lock
                 overlay[nid] = (new_start, new_start + length, new_pitch, vel)
             elif mode == "resize_start":
                 new_start = min(self._shift(s_tick, d_seconds, no_snap), e_tick - grid)
@@ -477,14 +544,14 @@ class PianoRollView(QWidget):
     def mouseDoubleClickEvent(self, event) -> None:
         """Double-click empty grid to add a note (snapped, on the played track)."""
         pos = event.position()
-        in_notes = pos.y() <= self.height() - self._keyboard_height()
+        in_notes = pos.y() <= self._notes_bottom()
         if (
             event.button() == Qt.MouseButton.LeftButton
             and self._time_map is not None
             and in_notes
             and self._hit_test(pos) is None
         ):
-            pitch = self._pitch_at_x(pos.x())
+            pitch = self._scale_snap_pitch(self._pitch_at_x(pos.x()))
             no_snap = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
             start_tick = self._start_tick_at_y(pos.y(), no_snap)
             self.noteAddRequested.emit((pitch, start_tick))
@@ -493,7 +560,7 @@ class PianoRollView(QWidget):
             super().mouseDoubleClickEvent(event)
 
     def _start_tick_at_y(self, y: float, no_snap: bool) -> int:
-        notes_bottom = self.height() - self._keyboard_height()
+        notes_bottom = self._notes_bottom()
         seconds = self._position + (notes_bottom - y) / notes_bottom * self._look_ahead
         return self._snap_tick(self._time_map.seconds_to_ticks(seconds), no_snap)
 
@@ -548,6 +615,12 @@ class PianoRollView(QWidget):
             dy = event.position().y() - self._zoom_start_y
             self.set_look_ahead(self._zoom_start_look * (1.0 + dy / 250.0))
             event.accept()
+        elif self._vel_dragging:
+            self._vel_lane_paint(event.position())
+            event.accept()
+        elif self._draw is not None:
+            self._update_draw(event)
+            event.accept()
         elif self._drag is not None:
             self._update_drag(event)
             event.accept()
@@ -563,6 +636,12 @@ class PianoRollView(QWidget):
             self._zooming = False
             self.unsetCursor()
             event.accept()
+        elif event.button() == Qt.MouseButton.LeftButton and self._vel_dragging:
+            self._finish_vel_lane()
+            event.accept()
+        elif event.button() == Qt.MouseButton.LeftButton and self._draw is not None:
+            self._finish_draw()
+            event.accept()
         elif event.button() == Qt.MouseButton.LeftButton and self._drag is not None:
             self._finish_drag()
             event.accept()
@@ -571,6 +650,96 @@ class PianoRollView(QWidget):
             event.accept()
         else:
             super().mouseReleaseEvent(event)
+
+    # -- Drag-to-draw a note ---------------------------------------------
+    def _begin_draw(self, pos, event) -> None:
+        no_snap = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
+        pitch = self._scale_snap_pitch(self._pitch_at_x(pos.x()))
+        anchor = self._start_tick_at_y(pos.y(), no_snap)
+        grid = self._grid_ticks()
+        self._draw = {"pitch": pitch, "anchor": anchor, "lo": anchor, "hi": anchor + grid}
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.update()
+
+    def _update_draw(self, event) -> None:
+        no_snap = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
+        cur = self._start_tick_at_y(event.position().y(), no_snap)
+        anchor = self._draw["anchor"]
+        grid = self._grid_ticks()
+        lo, hi = min(anchor, cur), max(anchor, cur)
+        if hi - lo < grid:
+            hi = lo + grid
+        self._draw["lo"], self._draw["hi"] = lo, hi
+        self.update()
+
+    def _finish_draw(self) -> None:
+        d = self._draw
+        self._draw = None
+        self.unsetCursor()
+        length = d["hi"] - d["lo"]
+        if length <= 0:
+            self.update()
+            return
+        channel = self._primary_channel()
+        if channel is not None:
+            self._pending_selection = {(channel, d["pitch"], d["lo"])}
+        self.notesAddRequested.emit([(d["pitch"], d["lo"], length, 90)])
+
+    # -- Velocity lane ----------------------------------------------------
+    def _in_vel_lane(self, pos) -> bool:
+        if not self._vel_lane:
+            return False
+        top = self._notes_bottom()
+        return top < pos.y() <= top + self._lane_height()
+
+    def _vel_lane_notes(self) -> list[Note]:
+        """Notes shown in the lane: the selection if any, else the visible
+        editable notes — in time order."""
+        sel = self._selected_editable()
+        if sel:
+            return sorted(sel, key=lambda n: n.start_tick)
+        window = self._position + self._look_ahead
+        visible = [
+            v.note for v in self._vnotes
+            if not v.dim and v.note.end > self._position and v.note.start < window
+        ]
+        return sorted(visible, key=lambda n: n.start_tick)
+
+    def _begin_vel_lane(self, pos) -> None:
+        notes = self._vel_lane_notes()
+        if not notes:
+            return
+        self._vel_drag = {"notes": notes, "overlay": {}}
+        self._vel_dragging = True
+        self._vel_lane_paint(pos)
+
+    def _vel_lane_paint(self, pos) -> None:
+        notes = self._vel_drag["notes"]
+        count = len(notes)
+        if count == 0:
+            return
+        idx = max(0, min(count - 1, int(pos.x() / max(1, self.width()) * count)))
+        top = self._notes_bottom()
+        lane_h = self._lane_height()
+        frac = max(0.0, min(1.0, (top + lane_h - pos.y()) / max(1, lane_h)))
+        velocity = max(1, min(127, int(round(1 + frac * 126))))
+        self._vel_drag["overlay"][notes[idx].id] = velocity
+        self.update()
+
+    def _finish_vel_lane(self) -> None:
+        drag = self._vel_drag
+        self._vel_drag = None
+        self._vel_dragging = False
+        by_id = {n.id: n for n in drag["notes"]}
+        changes = {}
+        for nid, vel in drag["overlay"].items():
+            n = by_id.get(nid)
+            if n is not None and vel != n.velocity:
+                changes[nid] = (n.start_tick, n.end_tick, n.pitch, vel)
+        if changes:
+            self._emit_changes(changes)
+        else:
+            self.update()
 
     def _finish_marquee(self) -> None:
         m = self._marquee
@@ -585,7 +754,7 @@ class PianoRollView(QWidget):
 
     def _marquee_hits(self, rect: QRectF):
         """Editable vnotes whose on-screen rect intersects the marquee rect."""
-        notes_bottom = self.height() - self._keyboard_height()
+        notes_bottom = self._notes_bottom()
         geo, _ = self._key_geometry(self.width())
         hits = []
         for vnote in self._vnotes:
@@ -634,7 +803,11 @@ class PianoRollView(QWidget):
         for n in self._selected_editable():
             new_start = max(0, n.start_tick + d_tick)
             length = n.end_tick - n.start_tick
-            new_pitch = max(0, min(127, n.pitch + d_pitch))
+            if d_pitch and self._scale_lock and abs(d_pitch) == 1:
+                # A semitone arrow under scale lock steps to the next scale note.
+                new_pitch = self._scale_step(n.pitch, d_pitch)
+            else:
+                new_pitch = self._scale_snap_pitch(max(0, min(127, n.pitch + d_pitch)))
             changes[n.id] = (new_start, new_start + length, new_pitch, n.velocity)
         if changes:
             self._emit_changes(changes)
@@ -744,6 +917,15 @@ class PianoRollView(QWidget):
     def _keyboard_height(self) -> int:
         return min(110, max(60, int(self.height() * 0.18)))
 
+    def _lane_height(self) -> int:
+        """Height of the velocity lane (0 when it's off)."""
+        return 56 if self._vel_lane else 0
+
+    def _notes_bottom(self) -> int:
+        """Y of the hit line — bottom of the falling-notes area (above the
+        velocity lane and keyboard)."""
+        return self.height() - self._keyboard_height() - self._lane_height()
+
     def _key_geometry(self, width: float) -> tuple[dict[int, tuple[float, float, bool]], float]:
         """Map each pitch in range to (x, key_width, is_black)."""
         white_pitches = [p for p in range(self._lo, self._hi + 1) if _is_white(p)]
@@ -777,7 +959,7 @@ class PianoRollView(QWidget):
         width = self.width()
         height = self.height()
         kb_height = self._keyboard_height()
-        notes_bottom = height - kb_height  # the hit line / top of the keyboard
+        notes_bottom = self._notes_bottom()  # hit line (above the velocity lane)
 
         painter.fillRect(0, 0, width, height, self._theme.bg)
 
@@ -790,10 +972,57 @@ class PianoRollView(QWidget):
         self._draw_grid(painter, width, notes_bottom)
         self._draw_guides(painter, geo, notes_bottom)
         self._draw_notes(painter, geo, notes_bottom, active)
+        self._draw_note_preview(painter, geo, notes_bottom)
         self._draw_marquee(painter)
         self._draw_hit_line(painter, width, notes_bottom)
-        self._draw_keyboard(painter, geo, notes_bottom, kb_height, active)
+        self._draw_vel_lane(painter, width, notes_bottom)
+        keyboard_top = notes_bottom + self._lane_height()  # below the velocity lane
+        self._draw_keyboard(painter, geo, keyboard_top, kb_height, active)
         self._draw_legend(painter, width)
+
+    def _draw_note_preview(self, painter, geo, notes_bottom) -> None:
+        """The translucent note being drawn (drag-to-draw)."""
+        if self._draw is None or self._time_map is None:
+            return
+        start = self._time_map.tick_to_seconds(self._draw["lo"])
+        end = self._time_map.tick_to_seconds(self._draw["hi"])
+        rect = self._rect_for(start, end, self._draw["pitch"], geo, notes_bottom)
+        if rect is None:
+            return
+        fill = QColor(self._theme.hit_glow)
+        fill.setAlpha(150)
+        painter.setPen(QPen(self._theme.selection, 1))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(rect, 3, 3)
+
+    def _draw_vel_lane(self, painter, width, notes_bottom) -> None:
+        if not self._vel_lane:
+            return
+        lane_h = self._lane_height()
+        lane = QRectF(0, notes_bottom, width, lane_h)
+        # A shade clearly distinct from the piano background either way.
+        bg = self._theme.bg.lighter(150) if self._theme.dark else self._theme.bg.darker(112)
+        painter.fillRect(lane, bg)
+        painter.setPen(QPen(self._theme.key_border, 1))
+        painter.drawLine(0, int(notes_bottom), width, int(notes_bottom))
+
+        notes = self._vel_lane_notes()
+        count = len(notes)
+        if count == 0:
+            return
+        overlay = self._vel_drag["overlay"] if self._vel_drag else {}
+        color = next((v.color for v in self._vnotes if not v.dim), self._theme.hit_glow)
+        slot = width / count
+        for i, n in enumerate(notes):
+            vel = overlay.get(n.id, n.velocity)
+            h = (vel / 127.0) * (lane_h - 6)
+            x = i * slot + slot * 0.15
+            w = max(2.0, slot * 0.7)
+            bar = QRectF(x, notes_bottom + lane_h - h - 3, w, h)
+            c = QColor(color)
+            if n.id in self._selected:
+                c = c.lighter(140)
+            painter.fillRect(bar, c)
 
     def _draw_grid(self, painter, width, notes_bottom) -> None:
         """Horizontal beat/bar lines (and grid subdivisions when not too dense)
@@ -942,11 +1171,21 @@ class PianoRollView(QWidget):
 
     def _hit_test(self, pos):
         """The editable (non-dim) vnote under a point, or None."""
-        notes_bottom = self.height() - self._keyboard_height()
+        notes_bottom = self._notes_bottom()
         geo, _ = self._key_geometry(self.width())
         for vnote in reversed(self._vnotes):  # topmost first
             if vnote.dim:
                 continue
+            rect = self._note_rect(vnote.note, geo, notes_bottom)
+            if rect is not None and rect.contains(pos):
+                return vnote
+        return None
+
+    def _hit_test_any(self, pos):
+        """The topmost vnote under a point on any shown track (dim or not)."""
+        notes_bottom = self._notes_bottom()
+        geo, _ = self._key_geometry(self.width())
+        for vnote in reversed(self._vnotes):
             rect = self._note_rect(vnote.note, geo, notes_bottom)
             if rect is not None and rect.contains(pos):
                 return vnote
