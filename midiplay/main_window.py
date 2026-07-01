@@ -1550,8 +1550,17 @@ class MainWindow(QMainWindow):
 
     def _begin_capture(self) -> None:
         self._metro_last_beat = -1
-        if self._prepare():
-            self.engine.seek(self.engine.position())
+        # Make sure the engine holds the currently-played tracks (may be empty
+        # on a blank file — that's fine).
+        tracks = self.play_track_indices()
+        key = (id(self.midi_file), tuple(tracks))
+        if tracks and self._prepared_key != key:
+            self.engine.set_tracks(self.midi_file, tracks)
+            self._prepared_key = key
+        # Free-run so the clock keeps advancing past the (possibly empty) song
+        # end — otherwise recording on a short/blank track freezes immediately.
+        self.engine.set_free_run(True)
+        self.engine.seek(self.engine.position())
         self.engine.play()          # existing tracks play for context
         self.recorder.start(self.engine.position)
         self._recording = True
@@ -1563,7 +1572,8 @@ class MainWindow(QMainWindow):
             self._countin_timer.stop()
         events = self.recorder.stop()
         self._recording = False
-        self.engine.pause()         # keep the playhead where it stopped
+        self.engine.pause()         # freeze at the true record-end position
+        self.engine.set_free_run(False)
         if events and self._record_track is not None and self._time_map is not None:
             timed = [
                 (int(round(self._time_map.seconds_to_ticks(max(0.0, sec)))), msg)
