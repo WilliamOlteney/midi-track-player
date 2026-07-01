@@ -82,11 +82,31 @@ def describe(midi: mido.MidiFile, path: str) -> MidiFileInfo:
     """Build a MidiFileInfo from a loaded file."""
     return MidiFileInfo(
         path=path,
-        name=os.path.basename(path),
+        name=os.path.basename(path) or "untitled.mid",
         midi_format=midi.type,
         num_tracks=len(midi.tracks),
         ticks_per_beat=midi.ticks_per_beat,
     )
+
+
+def new_file(ticks_per_beat: int = 480) -> mido.MidiFile:
+    """A blank Type-1 file: a conductor track (tempo + 4/4) and one empty
+    instrument track ready to edit or record into."""
+    midi = mido.MidiFile(type=1, ticks_per_beat=ticks_per_beat)
+
+    conductor = mido.MidiTrack()
+    conductor.append(mido.MetaMessage("track_name", name="Tempo", time=0))
+    conductor.append(mido.MetaMessage("set_tempo", tempo=DEFAULT_TEMPO, time=0))
+    conductor.append(mido.MetaMessage("time_signature", numerator=4, denominator=4, time=0))
+    conductor.append(mido.MetaMessage("end_of_track", time=0))
+    midi.tracks.append(conductor)
+
+    track = mido.MidiTrack()
+    track.append(mido.MetaMessage("track_name", name="Track 1", time=0))
+    track.append(mido.Message("program_change", program=0, channel=0, time=0))
+    track.append(mido.MetaMessage("end_of_track", time=0))
+    midi.tracks.append(track)
+    return midi
 
 
 def track_infos(midi: mido.MidiFile) -> list[TrackInfo]:

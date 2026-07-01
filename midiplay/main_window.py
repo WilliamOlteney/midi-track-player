@@ -508,6 +508,7 @@ class MainWindow(QMainWindow):
         self._redo_stack: list = []
         self._dirty = False
         self._save_path = None        # set once the user has chosen a Save target
+        self._is_new = False          # True for a blank New file never saved
         self._pending_select_row = None    # row to select after a structural edit
         self._pending_show_indices = None  # tracks to re-show after a structural edit
         self._pending_play_indices = None  # tracks to re-play after a structural edit
@@ -589,6 +590,9 @@ class MainWindow(QMainWindow):
         # this window-level shortcut normally handles it first.
         self._space_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         self._space_shortcut.activated.connect(self._toggle_play_pause)
+
+        # Start with a blank file open so the app is immediately usable.
+        self.new_file()
 
     # -- Top: MIDI file selector ------------------------------------------
     def _build_top(self) -> QHBoxLayout:
@@ -1090,7 +1094,51 @@ class MainWindow(QMainWindow):
         self._update_inspector()  # disable selection widgets until something is picked
 
     # -- File loading -----------------------------------------------------
+    def new_file(self) -> None:
+        """Start a fresh blank file (a conductor track + one empty track)."""
+        if not self._confirm_discard():
+            return
+        self.engine.stop()
+        midi = smf.new_file()
+        self.midi_file = midi
+        self.file_info = smf.describe(midi, "untitled.mid")
+        self._time_map = smf.TimeMap(midi)
+        self._prepared_key = None
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+        self._dirty = False
+        self._save_path = None
+        self._is_new = True
+        self.file_path_edit.clear()
+        self.file_path_edit.setPlaceholderText("New file (unsaved)")
+        self.statusBar().showMessage("New file")
+        # Select/arm the empty instrument track (row 1), not the conductor.
+        self._populate_tracks(select_row=1, show_indices={1}, play_indices={1})
+        self._sync_all(preserve_playhead=False)
+        self._update_title()
+        self._update_edit_actions()
+
+    def _confirm_discard(self) -> bool:
+        """When there are unsaved edits, offer to save. Returns True if it's OK
+        to proceed (saved or discarded), False if the user cancelled."""
+        if not self._dirty:
+            return True
+        choice = QMessageBox.question(
+            self, "Unsaved changes", "Save changes first?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+        )
+        if choice == QMessageBox.StandardButton.Cancel:
+            return False
+        if choice == QMessageBox.StandardButton.Save:
+            self._save()
+            return not self._dirty  # False if the Save dialog was cancelled
+        return True  # Discard
+
     def _choose_file(self) -> None:
+        if not self._confirm_discard():
+            return
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Open MIDI File",
@@ -1119,6 +1167,7 @@ class MainWindow(QMainWindow):
         self._redo_stack.clear()
         self._dirty = False
         self._save_path = None     # don't silently overwrite the opened file
+        self._is_new = False
         self.file_path_edit.setText(path)
         self.statusBar().showMessage(f"Loaded: {info.summary()}")
         self._populate_tracks()
@@ -1661,7 +1710,7 @@ class MainWindow(QMainWindow):
 
     def dropEvent(self, event) -> None:
         path = self._dropped_midi_path(event)
-        if path:
+        if path and self._confirm_discard():
             self.load_file(path)
 
     @staticmethod
@@ -1718,6 +1767,9 @@ class MainWindow(QMainWindow):
     # -- Editing: menus ---------------------------------------------------
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
+        act_new = file_menu.addAction("New")
+        act_new.setShortcut(QKeySequence.StandardKey.New)
+        act_new.triggered.connect(self.new_file)
         act_open = file_menu.addAction("Open…")
         act_open.setShortcut(QKeySequence.StandardKey.Open)
         act_open.triggered.connect(self._choose_file)
@@ -1741,6 +1793,7 @@ class MainWindow(QMainWindow):
         self.act_transpose = edit_menu.addAction("Transpose Track…", self._edit_transpose)
         self.act_instrument = edit_menu.addAction("Change Instrument…", self._edit_instrument)
         edit_menu.addSeparator()
+        self.act_add_track = edit_menu.addAction("Add Track", self._edit_add_track)
         self.act_merge = edit_menu.addAction("Merge Playing Tracks", self._edit_merge)
         self.act_merge.setToolTip(
             "Combine the tracks with audio enabled (🔊) into one (needs two or more)"
@@ -1757,6 +1810,7 @@ class MainWindow(QMainWindow):
         menu.addAction("Transpose…", self._edit_transpose)
         menu.addAction("Change Instrument…", self._edit_instrument)
         menu.addSeparator()
+        menu.addAction("Add Track", self._edit_add_track)
         merge = menu.addAction("Merge Playing Tracks", self._edit_merge)
         merge.setEnabled(self.act_merge.isEnabled())
         delete = menu.addAction("Delete Track", self._edit_delete)
@@ -1795,6 +1849,17 @@ class MainWindow(QMainWindow):
         if ok:
             program = int(choice.split(":", 1)[0])
             self._apply_track_edit(index, lambda m: edits.set_track_program(m, index, program))
+
+    def _edit_add_track(self) -> None:
+        if self.midi_file is None:
+            return
+        new_index = len(self.midi_file.tracks)  # add_track appends here
+        # Keep existing show/play; show + select the new track so it's ready.
+        self._pending_show_indices = set(self.show_track_indices()) | {new_index}
+        self._pending_play_indices = set(self.play_track_indices()) | {new_index}
+        self._pending_select_row = new_index
+        self._apply_file_edit(lambda m: edits.add_track(m))
+        self.statusBar().showMessage("Added a track")
 
     def _edit_delete(self) -> None:
         index = self.selected_track_index()
@@ -1981,12 +2046,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Save failed", str(exc))
             return False
         self._dirty = False
+        self._is_new = False
         self._update_title()
         self.statusBar().showMessage(f"Saved: {path}")
         return True
 
     def _suggest_save_name(self) -> str:
-        if self.file_info is None:
+        if self.file_info is None or self._is_new:
             return "untitled.mid"
         stem = self.file_info.name.rsplit(".", 1)[0]
         return f"{stem}-edited.mid"
@@ -2008,6 +2074,7 @@ class MainWindow(QMainWindow):
             has_track and has_file and len(self.midi_file.tracks) > 1
         )
         self.act_merge.setEnabled(has_file and len(self.play_track_indices()) >= 2)
+        self.act_add_track.setEnabled(has_file)
         self.act_save.setEnabled(has_file)
         self.act_save_as.setEnabled(has_file)
         self.act_undo.setEnabled(bool(self._undo_stack))

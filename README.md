@@ -22,6 +22,10 @@ through (the transparency is adjustable in Settings).
 
 ## Features
 
+- Starts with a **new blank file** open (a conductor + one empty track) so you
+  can record or draw immediately. **New** (Ctrl+N) makes another; **Add Track**
+  adds more (each on its own channel). Switching away from unsaved edits prompts
+  to save first
 - Open a `.mid` file (file dialog or **drag-and-drop** onto the window)
 - Track list showing **track number · name · event count**, each row with two
   **independent toggle icons**: an **eye (👁)** to *show* the track on the piano
@@ -91,8 +95,8 @@ through (the transparency is adjustable in Settings).
   velocity lane, scale/key lock, and the selection inspector), and a
   **Recording** section (monitor/thru, metronome, count-in bars). Settings are
   remembered between runs
-- **Editing** (track-level): rename, transpose, change instrument, delete a
-  track, or **merge the playing (🔊) tracks into one** (their events are
+- **Editing** (track-level): rename, transpose, change instrument, **add** a
+  track, delete a track, or **merge the playing (🔊) tracks into one** (their events are
   interleaved in time and each keeps its channel) — via the Edit menu or
   right-click on a track. Full **undo/redo**, an
   unsaved-changes (`*`) indicator, and non-destructive **Save As** — the

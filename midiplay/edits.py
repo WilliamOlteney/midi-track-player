@@ -92,6 +92,23 @@ def delete_track(midi: mido.MidiFile, index: int) -> None:
     del midi.tracks[index]
 
 
+def add_track(midi: mido.MidiFile, name: str | None = None, channel: int | None = None) -> int:
+    """Append a new empty track (named, with a program_change) and return its
+    index. The channel defaults to the new track's position, so successive
+    tracks get distinct channels."""
+    index = len(midi.tracks)
+    if channel is None:
+        channel = max(0, index - 1) % 16
+    if name is None:
+        name = f"Track {index}"
+    track = mido.MidiTrack()
+    track.append(mido.MetaMessage("track_name", name=name, time=0))
+    track.append(mido.Message("program_change", program=0, channel=channel, time=0))
+    track.append(mido.MetaMessage("end_of_track", time=0))
+    midi.tracks.append(track)
+    return index
+
+
 def track_program(track: mido.MidiTrack) -> int:
     """Current program of a track (first program_change), or 0."""
     for msg in track:
