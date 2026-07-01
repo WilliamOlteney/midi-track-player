@@ -122,6 +122,7 @@ class PianoRollView(QWidget):
     notesEditRequested = Signal(object)    # {id: (start_tick, end_tick, pitch)}
     noteAddRequested = Signal(object)      # (pitch, start_tick)
     playPauseRequested = Signal()
+    legendToggled = Signal(bool)           # legend shown/hidden (e.g. via 'H')
 
     def __init__(self) -> None:
         super().__init__()
@@ -142,7 +143,8 @@ class PianoRollView(QWidget):
         self._label_font.setBold(True)
         self._legend_font = QFont()
         self._legend_font.setPointSize(8)
-        self._show_legend = True  # toggled with 'H'
+        self._show_legend = True   # toggled with 'H' or the settings drawer
+        self._labels_visible = True  # note-name labels on the falling notes
 
         # Scrubbing: while active, the engine's position is ignored and the
         # view follows the scrub position instead.
@@ -168,6 +170,20 @@ class PianoRollView(QWidget):
             return
         self._look_ahead = seconds
         self.lookAheadChanged.emit(seconds)
+        self.update()
+
+    def labels_visible(self) -> bool:
+        return self._labels_visible
+
+    def set_labels_visible(self, visible: bool) -> None:
+        self._labels_visible = bool(visible)
+        self.update()
+
+    def legend_visible(self) -> bool:
+        return self._show_legend
+
+    def set_legend_visible(self, visible: bool) -> None:
+        self._show_legend = bool(visible)
         self.update()
 
     def wheelEvent(self, event) -> None:
@@ -415,6 +431,7 @@ class PianoRollView(QWidget):
             event.accept()
         elif event.key() == Qt.Key.Key_H:
             self._show_legend = not self._show_legend
+            self.legendToggled.emit(self._show_legend)
             self.update()
             event.accept()
         elif event.key() == Qt.Key.Key_Space:
@@ -583,7 +600,7 @@ class PianoRollView(QWidget):
             if not vnote.dim and rect.height() >= 14 and rect.width() >= 20:
                 if vel_drag and note.id in self._overlay:
                     self._draw_note_label(painter, rect, f"v{velocity}")
-                else:
+                elif self._labels_visible:
                     self._draw_note_label(painter, rect, note_name(pitch))
 
     def _draw_note_label(self, painter, rect, text) -> None:
